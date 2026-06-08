@@ -1,0 +1,350 @@
+{
+  "cases": [
+    {
+      "id": "kb-architecture-summary",
+      "message": "What does the product overview say about the chatbot API architecture?",
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-1",
+          "usage": {
+            "input_tokens": 48,
+            "output_tokens": 12,
+            "total_tokens": 60
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-1",
+              "name": "search_knowledge_base",
+              "arguments": {
+                "query": "What does the product overview say about the chatbot API architecture?",
+                "top_k": 1
+              }
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-2",
+          "content": "The product overview describes a FastAPI backend orchestrated with LangGraph for chat, retrieval, and tools.",
+          "usage": {
+            "input_tokens": 20,
+            "output_tokens": 11,
+            "total_tokens": 31
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "search_knowledge_base",
+          "status": "completed",
+          "input_subset": {
+            "query": "What does the product overview say about the chatbot API architecture?",
+            "top_k": 1
+          },
+          "output_subset": {
+            "hits": [
+              {
+                "filename": "product_overview.md",
+                "chunk_index": 0
+              }
+            ]
+          }
+        }
+      ],
+      "expected_sources": [
+        {
+          "filename": "product_overview.md",
+          "chunk_indexes": [
+            0
+          ]
+        }
+      ],
+      "minimum_expected_source_hits": 1,
+      "expected_answer_substrings": [
+        "FastAPI",
+        "LangGraph"
+      ],
+      "notes": "Search tool should retrieve the overview doc and propagate a citation."
+    },
+    {
+      "id": "kb-billing-disambiguation",
+      "message": "Which document explains refunds instead of incident response?",
+      "history": [
+        {
+          "role": "user",
+          "content": "We were comparing support docs."
+        },
+        {
+          "role": "assistant",
+          "content": "Okay, I will distinguish billing answers from incident guidance."
+        }
+      ],
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-3",
+          "usage": {
+            "input_tokens": 42,
+            "output_tokens": 10,
+            "total_tokens": 52
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-2",
+              "name": "search_knowledge_base",
+              "arguments": {
+                "query": "Which document explains refunds instead of incident response?",
+                "top_k": 2
+              }
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-4",
+          "content": "The billing FAQ explains refunds; the incident runbook is for response workflow, not refunds.",
+          "usage": {
+            "input_tokens": 22,
+            "output_tokens": 12,
+            "total_tokens": 34
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "search_knowledge_base",
+          "status": "completed",
+          "input_subset": {
+            "query": "Which document explains refunds instead of incident response?",
+            "top_k": 2
+          },
+          "output_subset": {
+            "hits": [
+              {
+                "filename": "billing_faq.md"
+              }
+            ]
+          }
+        }
+      ],
+      "expected_sources": [
+        {
+          "filename": "billing_faq.md"
+        }
+      ],
+      "minimum_expected_source_hits": 1,
+      "expected_answer_substrings": [
+        "billing FAQ",
+        "refunds"
+      ],
+      "forbidden_answer_substrings": [
+        "incident commander"
+      ],
+      "notes": "Uses seeded history and verifies disambiguation between billing and ops docs."
+    },
+    {
+      "id": "calculator-happy-path",
+      "message": "What is (2 + 3) * 4?",
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-5",
+          "usage": {
+            "input_tokens": 25,
+            "output_tokens": 8,
+            "total_tokens": 33
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-3",
+              "name": "calculator",
+              "arguments": {
+                "expression": "(2 + 3) * 4"
+              }
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-6",
+          "content": "The result is 20.",
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 6,
+            "total_tokens": 18
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "calculator",
+          "status": "completed",
+          "input_subset": {
+            "expression": "(2 + 3) * 4"
+          },
+          "output_subset": {
+            "result": 20
+          }
+        }
+      ],
+      "expected_answer_substrings": [
+        "20"
+      ],
+      "notes": "Pure tool execution case without retrieval citations."
+    },
+    {
+      "id": "rejected-tool-allowlist",
+      "message": "Can you check the live weather in San Francisco?",
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-7",
+          "usage": {
+            "input_tokens": 28,
+            "output_tokens": 7,
+            "total_tokens": 35
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-4",
+              "name": "weather_lookup",
+              "arguments": {
+                "city": "San Francisco"
+              }
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-8",
+          "content": "I cannot check live weather because that tool is not allowlisted in this backend.",
+          "usage": {
+            "input_tokens": 14,
+            "output_tokens": 7,
+            "total_tokens": 21
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "weather_lookup",
+          "status": "rejected",
+          "input_subset": {
+            "city": "San Francisco"
+          }
+        }
+      ],
+      "expected_answer_substrings": [
+        "not allowlisted"
+      ],
+      "notes": "Confirms rejected tool calls are surfaced in metadata and final answer can handle the failure path."
+    },
+    {
+      "id": "current-user-profile-found",
+      "message": "What plan am I on right now?",
+      "request_metadata": {
+        "user_profile": {
+          "user_id": "user-123",
+          "display_name": "Alice",
+          "plan": "pro",
+          "locale": "en-US",
+          "preferences": {
+            "timezone": "UTC"
+          }
+        }
+      },
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-9",
+          "usage": {
+            "input_tokens": 22,
+            "output_tokens": 6,
+            "total_tokens": 28
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-5",
+              "name": "get_current_user_profile",
+              "arguments": {}
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-10",
+          "content": "You are currently on the pro plan.",
+          "usage": {
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "total_tokens": 19
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "get_current_user_profile",
+          "status": "completed",
+          "output_subset": {
+            "found": true,
+            "profile": {
+              "user_id": "user-123",
+              "plan": "pro"
+            }
+          }
+        }
+      ],
+      "expected_answer_substrings": [
+        "pro plan"
+      ],
+      "notes": "Verifies the workflow can read a request-scoped user profile through the tool loop."
+    },
+    {
+      "id": "current-user-profile-missing",
+      "message": "What locale do you have for me?",
+      "script": [
+        {
+          "type": "tool_call_batch",
+          "response_id": "resp-11",
+          "usage": {
+            "input_tokens": 20,
+            "output_tokens": 5,
+            "total_tokens": 25
+          },
+          "tool_calls": [
+            {
+              "call_id": "tool-6",
+              "name": "get_current_user_profile",
+              "arguments": {}
+            }
+          ]
+        },
+        {
+          "type": "final_answer",
+          "response_id": "resp-12",
+          "content": "I do not have your profile in this request.",
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 8,
+            "total_tokens": 19
+          }
+        }
+      ],
+      "expected_tool_runs": [
+        {
+          "tool_name": "get_current_user_profile",
+          "status": "completed",
+          "output_subset": {
+            "found": false,
+            "profile": null
+          }
+        }
+      ],
+      "expected_answer_substrings": [
+        "do not have your profile"
+      ],
+      "notes": "Ensures missing profile data stays a normal completed tool result instead of a failure."
+    }
+  ]
+}

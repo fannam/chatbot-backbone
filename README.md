@@ -1,0 +1,481 @@
+# Chatbot API
+
+Phase 0 bootstrap for the chatbot backend. This scaffold provides:
+
+- FastAPI application with a `GET /health` endpoint
+- Chat API with `POST /chat` backed by an OpenAI provider abstraction
+- Async-first document ingestion API with `POST /documents` and `GET /documents/{id}`
+- Tool-aware chat with allowlisted structured actions and tool trace metadata
+- Request-scoped profile lookup via the `get_current_user_profile` tool
+- Knowledge-base search tool backed by chunk embeddings and source metadata
+- Optional SSE streaming for `POST /chat` via `stream: true`
+- Local-first observability with structured logs, `X-Request-ID`, and `GET /metrics`
+- Optional LangSmith tracing for `POST /chat`, LangGraph workflow, tool calls, and retrieval
+- PostgreSQL-backed persistence for conversations and messages
+- PostgreSQL-backed persistence for tool execution history
+- PostgreSQL-backed persistence for document metadata and chunks
+- Celery worker for background document embedding jobs
+- LangGraph workflow orchestration with durable checkpoints on PostgreSQL
+- Python project management with `uv`
+- pytest and Ruff configuration
+- Docker Compose services for API, PostgreSQL, and Redis
+- Alembic migration for the initial chat tables
+
+## Prerequisites
+
+- Python 3.12+
+- `uv`
+- Docker and Docker Compose
+
+## Local development
+
+Create a local environment file:
+
+```bash
+cp .env.example .env
+```
+
+Set the OpenAI credentials in `.env` before using `POST /chat`.
+
+Install dependencies:
+
+```bash
+uv sync --extra dev
+```
+
+Run the API in reload mode:
+
+```bash
+uv run uvicorn chatbot_api.main:app --reload --app-dir src
+```
+
+Run the background worker in a second terminal:
+
+```bash
+uv run celery -A chatbot_api.celery_app:celery_app worker --loglevel=info
+```
+
+Example chat request:
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hello",
+    "metadata": {"source": "manual-test"}
+  }'
+```
+
+Expected response shape:
+
+```json
+{
+  "conversation_id": "generated-or-supplied-id",
+  "message": {
+    "role": "assistant",
+    "content": "..."
+  },
+  "provider": "openai",
+  "model": "gpt-4.1-mini",
+  "metadata": {
+    "citations": [
+      {
+        "document_id": "stored-document-id",
+        "filename": "notes.md",
+        "chunk_index": 0,
+        "start_offset": 0,
+        "end_offset": 120,
+        "snippet": "Relevant excerpt..."
+      }
+    ],
+    "tool_runs": [
+      {
+        "tool_call_id": "fc_123",
+        "tool_name": "search_knowledge_base",
+        "status": "completed",
+        "input": {
+          "query": "What does the guide say?"
+        },
+        "output": {
+          "hits": []
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 30,
+      "total_tokens": 150
+    },
+    "cost": {
+      "input_cost_usd": 0.000048,
+      "output_cost_usd": 0.000048,
+      "total_cost_usd": 0.000096,
+      "currency": "USD"
+    }
+  }
+}
+```
+
+`POST /chat` persists both the user and assistant turns. When a caller sends an
+existing `conversation_id`, the stored history is loaded and replayed to the LLM
+provider before generating the next answer. When retrieval finds relevant chunks,
+the model can call the allowlisted `search_knowledge_base` tool and the response
+includes both citation metadata and executed `tool_runs` without altering
+`message.content`. Tool execution is conservative by default: tools are
+allowlisted, validated with schemas, and time-bounded.
+
+The request `metadata` object is also the source for request-scoped tool context.
+The reserved key `metadata.user_profile` can be used by the allowlisted
+`get_current_user_profile` tool. The current Phase 4 contract is:
+
+```json
+{
+  "user_profile": {
+    "user_id": "user-123",
+    "display_name": "Alice",
+    "email": "alice@example.com",
+    "plan": "pro",
+    "locale": "en-US",
+    "preferences": {
+      "timezone": "UTC"
+    }
+  }
+}
+```
+
+If `user_profile` is missing or malformed, the tool still completes normally and
+returns `{"found": false, "profile": null}` instead of failing the tool call.
+
+Example chat request with request-scoped profile data:
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "What plan am I on?",
+    "metadata": {
+      "user_profile": {
+        "user_id": "user-123",
+        "display_name": "Alice",
+        "plan": "pro",
+        "preferences": {"timezone": "UTC"}
+      }
+    }
+  }'
+```
+
+Example document upload:
+
+```bash
+curl -X POST http://localhost:8000/documents \
+  -F "file=@/path/to/notes.md"
+```
+
+Expected response shape:
+
+```json
+{
+  "document_id": "generated-id",
+  "filename": "notes.md",
+  "content_type": "text/markdown",
+  "byte_size": 1234,
+  "status": "processing",
+  "chunk_count": 2,
+  "created_at": "2026-06-04T00:00:00Z"
+}
+```
+
+`POST /documents` accepts UTF-8 `txt`/`md` files and text-based PDFs. The API
+extracts text, chunks it deterministically, persists the document with
+`status=processing`, then enqueues a Celery job to generate embeddings in the
+background. Retrieval only uses documents after they are marked `ready`.
+
+Poll the document status:
+
+```bash
+curl http://localhost:8000/documents/generated-id
+```
+
+Example status response:
+
+```json
+{
+  "document_id": "generated-id",
+  "filename": "notes.md",
+  "content_type": "text/markdown",
+  "byte_size": 1234,
+  "status": "ready",
+  "chunk_count": 2,
+  "created_at": "2026-06-04T00:00:00Z",
+  "updated_at": "2026-06-04T00:00:05Z",
+  "failure_reason": null
+}
+```
+
+Inspect tool execution history for a conversation:
+
+```bash
+curl "http://localhost:8000/conversations/generated-or-supplied-id/tool-runs?limit=50"
+```
+
+Expected response shape:
+
+```json
+{
+  "conversation_id": "generated-or-supplied-id",
+  "tool_runs": [
+    {
+      "id": 2,
+      "tool_call_id": "fc_123",
+      "tool_name": "search_knowledge_base",
+      "status": "completed",
+      "input": {
+        "query": "What does the guide say?"
+      },
+      "output": {
+        "hits": []
+      },
+      "error": null,
+      "started_at": "2026-06-08T00:00:00Z",
+      "completed_at": "2026-06-08T00:00:01Z"
+    }
+  ]
+}
+```
+
+`GET /conversations/{conversation_id}/tool-runs` is a read-only debug endpoint.
+It returns the newest tool runs first, supports `limit` from `1` to `100`, and
+returns `404` when the conversation does not exist.
+
+## Observability
+
+Every HTTP response includes an `X-Request-ID` header. If the client sends one,
+the API preserves it; otherwise the API generates one. Structured JSON logs use
+the same request ID so a single chat, upload, or SSE stream can be correlated
+across request logs and internal tool/retrieval events.
+
+`POST /chat` can also emit structured traces through a trace sink abstraction.
+The default sink is a no-op. When LangSmith is enabled, the API traces the chat
+request root span plus nested workflow, model round, tool, and retrieval spans
+without changing the HTTP or SSE response contracts.
+
+Prometheus-style metrics are available at:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Current metrics include HTTP request totals/latency, chat request totals/latency,
+workflow totals, provider LLM request totals/latency, LLM token/cost counters,
+tool execution totals/latency, retrieval hit counters, document upload totals,
+and document embedding job totals/latency.
+
+Observability-related environment variables:
+
+```bash
+OBSERVABILITY_JSON_LOGS=true
+OBSERVABILITY_METRICS_ENABLED=true
+OBSERVABILITY_INCLUDE_REQUEST_METADATA=false
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=chatbot-api
+LANGSMITH_ENDPOINT=
+OPENAI_MODEL_INPUT_PRICE_PER_1M_TOKENS=0.40
+OPENAI_MODEL_OUTPUT_PRICE_PER_1M_TOKENS=1.60
+```
+
+`OBSERVABILITY_INCLUDE_REQUEST_METADATA` stays off by default to avoid logging
+arbitrary caller metadata. If pricing env vars are blank, the API still reports
+token usage but omits estimated cost.
+
+To enable LangSmith tracing, set `LANGSMITH_TRACING=true` and provide
+`LANGSMITH_API_KEY`. `LANGSMITH_PROJECT` defaults to `chatbot-api`, and
+`LANGSMITH_ENDPOINT` is only needed for non-default or self-hosted deployments.
+
+Both the sync and SSE paths now go through the same LangGraph workflow:
+`load_context -> call_model -> execute_tools? -> call_model -> persist_response`.
+
+To stream the assistant response over SSE, send `stream: true`:
+
+```bash
+curl -N -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hello",
+    "stream": true
+  }'
+```
+
+Streaming responses use `text/event-stream` and emit these events:
+
+- `message_start`
+- `tool_start`
+- `tool_complete`
+- `tool_error`
+- `message_delta`
+- `message_complete`
+- `error`
+
+The endpoint keeps the existing JSON behavior when `stream` is omitted or `false`.
+When tool execution succeeds, the `message_complete` payload can include both
+`metadata.citations` and `metadata.tool_runs`. The terminal JSON and SSE payloads
+can also include aggregated `metadata.usage` and `metadata.cost` for the full
+chat request, including extra model rounds triggered by tool calling.
+
+## Quality checks
+
+Run tests:
+
+```bash
+uv run pytest
+```
+
+Run lint:
+
+```bash
+uv run ruff check .
+```
+
+## Docker Compose
+
+Start the local stack:
+
+```bash
+docker compose up --build
+```
+
+The stack exposes:
+
+- API: `http://localhost:8000`
+- PostgreSQL: `localhost:5432`
+- Redis: `localhost:6379`
+- Worker: Celery process consuming document embedding jobs
+
+## Database migrations
+
+Apply the current schema with:
+
+```bash
+uv run alembic upgrade head
+```
+
+Create a future revision with:
+
+```bash
+uv run alembic revision -m "describe change"
+```
+
+Enqueue embedding jobs for existing documents that still have missing chunk
+embeddings:
+
+```bash
+uv run python -m chatbot_api.reindex_embeddings
+```
+
+## Retrieval eval baseline
+
+The repo includes an offline retrieval baseline to measure document selection
+quality before changing retrieval thresholds, ANN indexes, or reranking:
+
+```bash
+uv run python -m chatbot_api.rag_eval \
+  --dataset evals/rag_retrieval_baseline.json \
+  --output .artifacts/rag-eval-report.json
+```
+
+The checked-in dataset uses stable `filename` expectations because uploaded
+`document_id` values are generated at ingest time. Each case declares
+`expected_sources`, where every source can match by `filename`, `document_id`,
+or both, plus optional `chunk_indexes` for chunk-level checks.
+
+If you want a reproducible starter corpus, upload the files in
+`evals/fixtures/` first, wait until each document is `ready`, then run the eval
+command. The summary prints document hit rate, average expected-document
+coverage, optional chunk hit rate, and failed case IDs. The JSON report includes
+per-case retrieved chunks and the active retrieval config.
+
+## Chat/tool regression eval
+
+The repo also includes a deterministic service-level regression eval for the
+`ChatService` + LangGraph + tool-calling path:
+
+```bash
+uv run python -m chatbot_api.chat_eval \
+  --dataset evals/chat_tool_regression.json \
+  --output .artifacts/chat-eval-report.json
+```
+
+This eval does not call a live chat model. Instead, it uses a scripted provider
+for the model rounds while keeping the real workflow, tool registry, retrieval,
+repository persistence, citation propagation, and usage/cost aggregation in the
+execution path. That makes it stable enough for regression checks without
+changing the `/chat` API contract.
+
+The checked-in dataset covers:
+
+- `search_knowledge_base` grounded answer flow
+- cross-document disambiguation with seeded conversation history
+- `calculator` happy path
+- rejected non-allowlisted tool calls
+- request-scoped `get_current_user_profile` success and missing-profile flows
+
+If you want a reproducible starter corpus for the search cases, upload the
+files in `evals/fixtures/` first and wait until each document is `ready`. The
+summary prints pass rate plus tool/source/answer match rates, and the JSON
+report includes per-case failures, tool runs, citations, and aggregated
+usage/cost metadata.
+
+## Combined eval suite
+
+For a single local/dev quality gate that checks corpus readiness and runs both
+offline evals together:
+
+```bash
+uv run python -m chatbot_api.eval_suite \
+  --rag-dataset evals/rag_retrieval_baseline.json \
+  --chat-dataset evals/chat_tool_regression.json \
+  --output-dir .artifacts
+```
+
+The suite first checks that every expected filename referenced by the checked-in
+datasets exists in the database and has at least one document in `ready` state.
+If preflight fails, the suite writes `.artifacts/eval-suite-report.json` and
+exits non-zero without running the child evals.
+
+When preflight passes, the suite writes:
+
+- `.artifacts/rag-eval-report.json`
+- `.artifacts/chat-eval-report.json`
+- `.artifacts/eval-suite-report.json`
+
+Default quality gates are strict for local/dev regression use:
+
+- retrieval `document_hit_rate >= 1.0`
+- retrieval `chunk_hit_rate >= 1.0` when chunk expectations exist
+- chat/tool `pass_rate >= 1.0`
+
+You can relax them with `--min-rag-document-hit-rate`,
+`--min-rag-chunk-hit-rate`, and `--min-chat-pass-rate`.
+
+## Environment variables
+
+- `OPENAI_API_KEY`: required for `POST /chat`
+- `OPENAI_MODEL`: defaults to `gpt-4.1-mini`
+- `OPENAI_EMBEDDING_MODEL`: defaults to `text-embedding-3-small`
+- `LLM_TIMEOUT_SECONDS`: request timeout for the upstream LLM call
+- `DOCUMENT_MAX_BYTES`: upload size limit for `POST /documents`
+- `DOCUMENT_CHUNK_SIZE_CHARS`: target chunk size for stored document chunks
+- `DOCUMENT_CHUNK_OVERLAP_CHARS`: overlap between adjacent stored document chunks
+- `DOCUMENT_EMBEDDING_DIMENSIONS`: embedding vector size for stored chunks
+- `DOCUMENT_EMBEDDING_BATCH_SIZE`: chunk batch size used by the embedding worker and reindex scan
+- `DOCUMENT_EMBEDDING_TASK_MAX_RETRIES`: maximum Celery retries for temporary embedding failures
+- `DOCUMENT_EMBEDDING_TASK_RETRY_BACKOFF_SECONDS`: base exponential backoff for embedding retries
+- `RETRIEVAL_TOP_K`: number of retrieved chunks injected into chat
+- `RETRIEVAL_MIN_SCORE`: minimum similarity score required before a chunk is used
+- `RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT`: per-document cap applied after ranking
+- `RETRIEVAL_CANDIDATE_LIMIT`: number of ranked candidates fetched before filtering and dedupe
+- `DATABASE_URL`: SQLAlchemy connection string used for chat persistence
+- `LANGGRAPH_CHECKPOINT_DATABASE_URL`: optional Postgres DSN for LangGraph
+  checkpoints; defaults to a driverless form derived from `DATABASE_URL`
+- `REDIS_URL`: Redis connection used locally
+- `CELERY_BROKER_URL`: broker URL for Celery; defaults to `REDIS_URL`

@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "id": "product-overview-summary",
+      "query": "What does the product overview say about the chatbot API architecture?",
+      "expected_sources": [
+        {
+          "filename": "product_overview.md",
+          "chunk_indexes": [0]
+        }
+      ],
+      "notes": "Checks direct retrieval against the overview document."
+    },
+    {
+      "id": "product-overview-setup",
+      "query": "Which local services are needed to run the chatbot stack?",
+      "expected_sources": [
+        {
+          "filename": "product_overview.md",
+          "chunk_indexes": [0]
+        }
+      ]
+    },
+    {
+      "id": "billing-faq-refunds",
+      "query": "How are refund requests handled for the chatbot service?",
+      "expected_sources": [
+        {
+          "filename": "billing_faq.md",
+          "chunk_indexes": [0]
+        }
+      ]
+    },
+    {
+      "id": "billing-faq-overages",
+      "query": "What happens when a team goes over the monthly usage limit?",
+      "expected_sources": [
+        {
+          "filename": "billing_faq.md",
+          "chunk_indexes": [0]
+        }
+      ]
+    },
+    {
+      "id": "runbook-severity-one",
+      "query": "What should the on-call engineer do first during a severity-one incident?",
+      "expected_sources": [
+        {
+          "filename": "incident_runbook.md",
+          "chunk_indexes": [0]
+        }
+      ]
+    },
+    {
+      "id": "runbook-postmortem",
+      "query": "When does the team write the incident postmortem?",
+      "expected_sources": [
+        {
+          "filename": "incident_runbook.md",
+          "chunk_indexes": [0]
+        }
+      ]
+    },
+    {
+      "id": "cross-doc-billing-vs-runbook",
+      "query": "Which document explains refunds instead of incident response?",
+      "expected_sources": [
+        {
+          "filename": "billing_faq.md"
+        }
+      ]
+    },
+    {
+      "id": "cross-doc-ops-vs-overview",
+      "query": "Which document describes the pager and incident commander workflow?",
+      "expected_sources": [
+        {
+          "filename": "incident_runbook.md"
+        }
+      ]
+    }
+  ]
+}
