@@ -34,6 +34,7 @@ from chatbot_api.settings import Settings
 from chatbot_api.tools import ToolRegistry, build_tool_registry
 from chatbot_api.tracing import NoopTraceSink
 from chatbot_api.workflow import (
+    MAX_METADATA_CITATIONS,
     WorkflowMessageComplete,
     WorkflowMessageDelta,
     WorkflowMessageStart,
@@ -44,6 +45,7 @@ from chatbot_api.workflow import (
     initial_workflow_state,
     load_context_node,
     load_memory_node,
+    merge_citations,
     persist_response_node,
     serialize_turn,
 )
@@ -1337,6 +1339,36 @@ async def test_chat_workflow_ignores_invalid_llm_memory_payload_and_returns_comp
 
     assert completion.content == "Answer still succeeds."
     assert memory_repository.upserted_memories == []
+
+
+def make_citation(document_id: str, chunk_index: int):
+    return {
+        "document_id": document_id,
+        "filename": f"{document_id}.md",
+        "chunk_index": chunk_index,
+        "start_offset": 0,
+        "end_offset": 10,
+        "snippet": "snippet",
+    }
+
+
+def test_merge_citations_does_not_exceed_cap_when_existing_is_already_at_cap() -> None:
+    existing = [make_citation("doc", index) for index in range(MAX_METADATA_CITATIONS)]
+    additions = [make_citation("doc", MAX_METADATA_CITATIONS)]
+
+    merged = merge_citations(existing, additions)
+
+    assert len(merged) == MAX_METADATA_CITATIONS
+    assert merged == existing
+
+
+def test_merge_citations_stops_exactly_at_cap() -> None:
+    existing = [make_citation("doc", 0)]
+    additions = [make_citation("doc", index) for index in range(1, MAX_METADATA_CITATIONS + 2)]
+
+    merged = merge_citations(existing, additions)
+
+    assert len(merged) == MAX_METADATA_CITATIONS
 
 
 def test_extract_rule_based_memories_captures_stable_preferences() -> None:

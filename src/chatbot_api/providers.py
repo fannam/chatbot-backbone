@@ -140,11 +140,14 @@ class OpenAIChatProvider:
 
         self._model = settings.openai_model
         self._trace_sink = trace_sink or NoopTraceSink()
-        base_client = AsyncOpenAI(
+        self._raw_client = AsyncOpenAI(
             api_key=settings.openai_api_key,
             timeout=settings.llm_timeout_seconds,
         )
-        self._client = self._trace_sink.wrap_openai_client(base_client)
+        self._client = self._trace_sink.wrap_openai_client(self._raw_client)
+
+    async def aclose(self) -> None:
+        await self._raw_client.close()
 
     async def generate_response(
         self,

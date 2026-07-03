@@ -696,17 +696,11 @@ def build_report(
             pass_rate=safe_ratio(passed_cases, total_cases),
             failed_case_ids=failed_case_ids,
             tool_expectation_case_count=tool_expectation_case_count,
-            tool_match_rate=safe_ratio(tool_match_count, tool_expectation_case_count)
-            if tool_expectation_case_count
-            else 0.0,
+            tool_match_rate=safe_ratio(tool_match_count, tool_expectation_case_count),
             source_expectation_case_count=source_expectation_case_count,
-            source_match_rate=safe_ratio(source_match_count, source_expectation_case_count)
-            if source_expectation_case_count
-            else 0.0,
+            source_match_rate=safe_ratio(source_match_count, source_expectation_case_count),
             answer_expectation_case_count=answer_expectation_case_count,
-            answer_match_rate=safe_ratio(answer_match_count, answer_expectation_case_count)
-            if answer_expectation_case_count
-            else 0.0,
+            answer_match_rate=safe_ratio(answer_match_count, answer_expectation_case_count),
         ),
         cases=list(case_reports),
     )
@@ -721,12 +715,17 @@ async def run_chat_eval(
 ) -> ChatEvalReport:
     resolved_settings = settings or get_settings()
     dataset = load_chat_eval_dataset(dataset_path)
+    owns_embedding_provider = embedding_provider is None
     resolved_embedding_provider = embedding_provider or OpenAIEmbeddingProvider(resolved_settings)
-    case_reports = await evaluate_chat_dataset(
-        dataset.cases,
-        settings=resolved_settings,
-        embedding_provider=resolved_embedding_provider,
-    )
+    try:
+        case_reports = await evaluate_chat_dataset(
+            dataset.cases,
+            settings=resolved_settings,
+            embedding_provider=resolved_embedding_provider,
+        )
+    finally:
+        if owns_embedding_provider:
+            await resolved_embedding_provider.aclose()
     report = build_report(
         dataset_path=dataset_path,
         dataset=dataset,

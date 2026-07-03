@@ -23,7 +23,12 @@ from chatbot_api.retrieval import DocumentRetriever
 from chatbot_api.services import ChatService, ChatStreamComplete, ChatStreamStart
 from chatbot_api.settings import Settings
 from chatbot_api.tools import build_tool_registry
-from chatbot_api.tracing import LangSmithTraceSink, NoopTraceSink, build_trace_sink
+from chatbot_api.tracing import (
+    LangSmithTraceSink,
+    NoopTraceSink,
+    build_trace_sink,
+    sanitize_trace_value,
+)
 from chatbot_api.workflow import ChatWorkflow, build_chat_workflow
 
 _CURRENT_SPAN: ContextVar["RecordedTraceSpan | None"] = ContextVar(
@@ -459,6 +464,21 @@ def test_build_trace_sink_returns_langsmith_when_langsmith_is_enabled() -> None:
 
     assert isinstance(sink, LangSmithTraceSink)
     sink.close()
+
+
+def test_noop_trace_span_finish_success_stores_outputs_separately_from_inputs() -> None:
+    sink = NoopTraceSink()
+    span = sink.start_span("unit.test", inputs={"query": "hello"})
+
+    span.finish_success(outputs={"answer": "world"})
+
+    assert span.inputs == {"query": "hello"}
+    assert span.outputs == {"answer": "world"}
+
+
+def test_sanitize_trace_value_preserves_none_inside_lists() -> None:
+    assert sanitize_trace_value([1, None, "a"]) == [1, None, "a"]
+    assert sanitize_trace_value(None) is None
 
 
 def test_langsmith_trace_sink_wraps_openai_client(monkeypatch: pytest.MonkeyPatch) -> None:

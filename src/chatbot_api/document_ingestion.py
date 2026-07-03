@@ -140,15 +140,14 @@ class DefaultDocumentTextExtractor:
     def _extract_pdf_text(self, content: bytes) -> str:
         try:
             reader = PdfReader(BytesIO(content))
+            page_texts = []
+            for page in reader.pages:
+                extracted = page.extract_text() or ""
+                normalized_page = normalize_document_text(extracted)
+                if normalized_page:
+                    page_texts.append(normalized_page)
         except Exception as exc:  # pragma: no cover - parser-specific failure modes
             raise DocumentContentError("failed to read PDF document") from exc
-
-        page_texts = []
-        for page in reader.pages:
-            extracted = page.extract_text() or ""
-            normalized_page = normalize_document_text(extracted)
-            if normalized_page:
-                page_texts.append(normalized_page)
 
         if not page_texts:
             raise DocumentContentError("document text is empty")
@@ -179,14 +178,16 @@ class TextChunker:
 
         while start < text_length:
             end = self._determine_chunk_end(normalized, start)
-            chunks.append(
-                TextChunk(
-                    index=len(chunks),
-                    content=normalized[start:end],
-                    start_offset=start,
-                    end_offset=end,
+            content = normalized[start:end]
+            if content.strip():
+                chunks.append(
+                    TextChunk(
+                        index=len(chunks),
+                        content=content,
+                        start_offset=start,
+                        end_offset=end,
+                    )
                 )
-            )
             if end >= text_length:
                 break
 

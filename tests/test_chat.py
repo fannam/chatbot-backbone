@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -10,13 +11,21 @@ from fastapi import status
 from httpx import ASGITransport, AsyncClient
 
 from chatbot_api.auth import AuthenticatedUser
-from chatbot_api.main import app, get_auth_repository, get_authenticated_user, get_chat_service
+from chatbot_api.main import (
+    app,
+    get_auth_repository,
+    get_authenticated_user,
+    get_chat_provider,
+    get_chat_service,
+)
+from chatbot_api.observability import configure_json_logger
 from chatbot_api.providers import (
     ChatCitation,
     ChatCompletion,
     ChatCompletionMetadata,
     ChatProviderError,
     ChatProviderTimeoutError,
+    OpenAIChatProvider,
     TokenUsage,
     ToolRun,
     UsageCost,
@@ -30,6 +39,7 @@ from chatbot_api.services import (
     ChatStreamToolStart,
 )
 from chatbot_api.settings import Settings, get_settings
+from chatbot_api.tracing import NoopTraceSink
 
 
 @dataclass(frozen=True)
@@ -180,6 +190,35 @@ async def async_client() -> AsyncClient:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client
+
+
+class ListLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def audit_log_handler() -> ListLogHandler:
+    # `configure_json_logger` clears existing handlers the first time it runs
+    # for the process; force it to run before attaching ours so this fixture
+    # doesn't depend on some other test having already triggered it first.
+    configure_json_logger()
+    handler = ListLogHandler()
+    logger = logging.getLogger("chatbot_api")
+    logger.addHandler(handler)
+    yield handler
+    logger.removeHandler(handler)
+
+
+def find_log_event(handler: ListLogHandler, event: str) -> dict[str, Any]:
+    for record in handler.records:
+        if isinstance(record.msg, dict) and record.msg.get("event") == event:
+            return record.msg
+    raise AssertionError(f"no log event named {event!r} was captured")
 
 
 @pytest.mark.anyio
@@ -488,6 +527,7 @@ async def test_chat_stream_maps_provider_timeout_before_start_to_gateway_timeout
 async def test_chat_requires_api_key_when_auth_is_enabled(
     async_client: AsyncClient,
     clear_dependency_overrides: None,
+    audit_log_handler: ListLogHandler,
 ) -> None:
     service = StubChatService(
         completion=ChatCompletion(
@@ -507,11 +547,15 @@ async def test_chat_requires_api_key_when_auth_is_enabled(
     assert response.json() == {"detail": "missing API key"}
     assert auth_repository.calls == []
 
+    logged_event = find_log_event(audit_log_handler, "auth.failed")
+    assert logged_event["reason"] == "missing_api_key"
+
 
 @pytest.mark.anyio
 async def test_chat_rejects_invalid_api_key_when_auth_is_enabled(
     async_client: AsyncClient,
     clear_dependency_overrides: None,
+    audit_log_handler: ListLogHandler,
 ) -> None:
     service = StubChatService(
         completion=ChatCompletion(
@@ -534,6 +578,10 @@ async def test_chat_rejects_invalid_api_key_when_auth_is_enabled(
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
     assert response.json() == {"detail": "invalid API key"}
     assert auth_repository.calls == ["bad-key"]
+
+    logged_event = find_log_event(audit_log_handler, "auth.failed")
+    assert logged_event["reason"] == "invalid_api_key"
+    assert "api_key_prefix" in logged_event
 
 
 @pytest.mark.anyio
@@ -647,3 +695,32 @@ async def test_chat_stream_passes_authenticated_owner_user_id(
             "owner_user_id": "user-456",
         }
     ]
+
+
+@pytest.mark.anyio
+async def test_openai_chat_provider_aclose_does_not_raise() -> None:
+    provider = OpenAIChatProvider(Settings(openai_api_key="test-key"))
+    await provider.aclose()
+
+
+@pytest.mark.anyio
+async def test_get_chat_provider_caches_instance_on_app_state() -> None:
+    class FakeApp:
+        def __init__(self) -> None:
+            self.state = type("State", (), {})()
+
+    class FakeRequest:
+        def __init__(self) -> None:
+            self.app = FakeApp()
+
+    request = FakeRequest()
+    settings = Settings(openai_api_key="test-key")
+    trace_sink = NoopTraceSink()
+
+    try:
+        first = await get_chat_provider(request, settings=settings, trace_sink=trace_sink)
+        second = await get_chat_provider(request, settings=settings, trace_sink=trace_sink)
+
+        assert first is second
+    finally:
+        await first.aclose()

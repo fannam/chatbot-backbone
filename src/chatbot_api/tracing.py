@@ -122,6 +122,7 @@ class NoopTraceSpan:
     name: str
     run_type: TraceRunType
     inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     finished: bool = False
@@ -167,7 +168,7 @@ class NoopTraceSpan:
             return
         self.annotate(metadata=metadata, tags=tags)
         if outputs:
-            self.inputs["outputs"] = sanitize_trace_payload(dict(outputs))
+            self.outputs = sanitize_trace_payload(dict(outputs))
         self.finished = True
         self._reset_activation()
 
@@ -477,6 +478,8 @@ def sanitize_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def sanitize_trace_value(value: Any) -> Any:
+    if value is None:
+        return None
     if isinstance(value, dict):
         return sanitize_trace_payload(value)
     if isinstance(value, (list, tuple)):

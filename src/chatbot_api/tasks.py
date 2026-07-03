@@ -5,7 +5,7 @@ from collections.abc import Callable
 from time import perf_counter
 
 from celery import Task
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 
 from chatbot_api.celery_app import celery_app
 from chatbot_api.database import create_database_engine, create_session_factory
@@ -24,12 +24,13 @@ async def run_embed_document(document_id: str) -> dict[str, str | int] | None:
     settings = get_settings()
     engine = create_database_engine(settings.database_url)
     session_factory = create_session_factory(engine)
+    embedding_provider = OpenAIEmbeddingProvider(settings)
     try:
         async with session_factory() as session:
             repository = SqlAlchemyDocumentRepository(session)
             service = DocumentEmbeddingService(
                 repository,
-                OpenAIEmbeddingProvider(settings),
+                embedding_provider,
                 batch_size=settings.document_embedding_batch_size,
             )
             result = await service.embed_document(document_id)
@@ -42,6 +43,7 @@ async def run_embed_document(document_id: str) -> dict[str, str | int] | None:
                 "updated_chunks": result.updated_chunks,
             }
     finally:
+        await embedding_provider.aclose()
         await engine.dispose()
 
 
@@ -119,12 +121,12 @@ def execute_embed_document_task(
                 error_type=type(exc).__name__,
             )
             raise
-
-        observability.record_document_embedding_job(
-            outcome="retry_scheduled",
-            duration_seconds=perf_counter() - started_at,
-        )
-        raise
+        except Retry:
+            observability.record_document_embedding_job(
+                outcome="retry_scheduled",
+                duration_seconds=perf_counter() - started_at,
+            )
+            raise
     except Exception as exc:
         asyncio.run(mark_failed_job(document_id, str(exc)))
         observability.record_document_embedding_job(

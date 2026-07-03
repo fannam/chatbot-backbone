@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 
 from chatbot_api.document_embeddings import DocumentEmbeddingService
 from chatbot_api.document_ingestion import DocumentChunkCreate, DocumentRecord
@@ -203,14 +203,18 @@ def test_execute_embed_document_task_retries_recoverable_errors() -> None:
         captured["marked_failed"] = (document_id, failure_reason)
 
     def retry(**kwargs):
+        # Real `Task.retry()` never returns normally: it always raises, either
+        # `Retry` when a retry was scheduled or `MaxRetriesExceededError` once
+        # exhausted. Mirror that here instead of silently returning.
         captured["retry"] = kwargs
+        raise Retry()
 
     settings = Settings(
         document_embedding_task_max_retries=4,
         document_embedding_task_retry_backoff_seconds=15,
     )
 
-    with pytest.raises(EmbeddingProviderError):
+    with pytest.raises(Retry):
         execute_embed_document_task(
             document_id="doc-1",
             retry_count=2,

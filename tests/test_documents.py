@@ -10,6 +10,7 @@ from chatbot_api.auth import AuthenticatedUser
 from chatbot_api.document_ingestion import (
     DefaultDocumentTextExtractor,
     DocumentChunkCreate,
+    DocumentContentError,
     DocumentIngestionService,
     DocumentRecord,
     TextChunker,
@@ -335,6 +336,27 @@ async def test_document_upload_accepts_pdf(
     assert payload["content_type"] == "application/pdf"
     stored = repository.documents[payload["document_id"]]
     assert stored.chunks[0].content == "Hello PDF"
+
+
+def test_pdf_extraction_wraps_per_page_errors_as_document_content_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pypdf._page import PageObject
+
+    def raise_on_extract(self) -> str:
+        raise RuntimeError("simulated parser failure on this page")
+
+    monkeypatch.setattr(PageObject, "extract_text", raise_on_extract)
+
+    pdf_bytes = build_minimal_pdf_bytes("Hello PDF")
+    extractor = DefaultDocumentTextExtractor()
+
+    with pytest.raises(DocumentContentError):
+        extractor.extract_text(
+            filename="sample.pdf",
+            content_type="application/pdf",
+            content=pdf_bytes,
+        )
 
 
 @pytest.mark.anyio

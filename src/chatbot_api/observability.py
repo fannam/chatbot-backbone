@@ -351,6 +351,13 @@ class ObservabilityService:
     ) -> None:
         self.increment("document_upload_requests_total", labels={"outcome": outcome})
 
+    def record_auth_attempt(
+        self,
+        *,
+        outcome: str,
+    ) -> None:
+        self.increment("auth_attempts_total", labels={"outcome": outcome})
+
     def record_document_embedding_job(
         self,
         *,
@@ -534,6 +541,12 @@ def build_metric_definitions() -> list[MetricDefinition]:
             name="document_upload_requests_total",
             kind="counter",
             description="Total document upload requests by outcome.",
+            labels=("outcome",),
+        ),
+        MetricDefinition(
+            name="auth_attempts_total",
+            kind="counter",
+            description="Total API key authentication attempts by outcome.",
             labels=("outcome",),
         ),
         MetricDefinition(

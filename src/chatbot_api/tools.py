@@ -204,6 +204,10 @@ class ToolRegistry:
                 tool.handler(validated_input, context),
                 timeout=tool.timeout_seconds,
             )
+            if not isinstance(output, tool.output_model):
+                raise TypeError(f"tool '{tool.name}' returned an unexpected output model")
+            citations = extract_tool_citations(output)
+            output_payload = output.model_dump(mode="json")
         except TimeoutError:
             result = ToolExecutionResult(
                 tool_run=ToolRun(
@@ -256,38 +260,33 @@ class ToolRegistry:
                 }
             )
             return result
-
-        if not isinstance(output, tool.output_model):
-            raise TypeError(f"tool '{tool.name}' returned an unexpected output model")
-
-        citations = extract_tool_citations(output)
-        output_payload = output.model_dump(mode="json")
-        result = ToolExecutionResult(
-            tool_run=ToolRun(
-                tool_call_id=tool_call.call_id,
-                tool_name=tool_call.name,
-                status="completed",
-                input=validated_input.model_dump(mode="json"),
-                output=output_payload,
-            ),
-            model_output=json.dumps(
-                {"status": "completed", "result": output_payload},
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            citations=citations,
-        )
-        self._record_tool_execution(result, duration_seconds=perf_counter() - started_at)
-        trace_span.finish_success(
-            outputs={
-                "tool_call_id": result.tool_run.tool_call_id,
-                "tool_name": result.tool_run.tool_name,
-                "status": result.tool_run.status,
-                "citation_count": len(citations),
-            }
-        )
-        return result
+        else:
+            result = ToolExecutionResult(
+                tool_run=ToolRun(
+                    tool_call_id=tool_call.call_id,
+                    tool_name=tool_call.name,
+                    status="completed",
+                    input=validated_input.model_dump(mode="json"),
+                    output=output_payload,
+                ),
+                model_output=json.dumps(
+                    {"status": "completed", "result": output_payload},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                citations=citations,
+            )
+            self._record_tool_execution(result, duration_seconds=perf_counter() - started_at)
+            trace_span.finish_success(
+                outputs={
+                    "tool_call_id": result.tool_run.tool_call_id,
+                    "tool_name": result.tool_run.tool_name,
+                    "status": result.tool_run.status,
+                    "citation_count": len(citations),
+                }
+            )
+            return result
 
     def _rejected_result(
         self,
@@ -470,6 +469,17 @@ def extract_tool_citations(output: BaseModel) -> list[ChatCitation]:
     ]
 
 
+MAX_POWER_RESULT_BITS = 4096
+
+
+def _safe_pow(base: float | int, exponent: float | int) -> float | int:
+    if isinstance(base, int) and isinstance(exponent, int) and exponent > 0:
+        estimated_bits = max(1, abs(base)).bit_length() * exponent
+        if estimated_bits > MAX_POWER_RESULT_BITS:
+            raise ValueError("exponentiation result is too large")
+    return pow(base, exponent)
+
+
 ALLOWED_BINARY_OPERATORS = {
     ast.Add: add,
     ast.Sub: sub,
@@ -477,7 +487,7 @@ ALLOWED_BINARY_OPERATORS = {
     ast.Div: truediv,
     ast.FloorDiv: floordiv,
     ast.Mod: mod,
-    ast.Pow: pow,
+    ast.Pow: _safe_pow,
 }
 ALLOWED_UNARY_OPERATORS = {
     ast.UAdd: lambda value: value,
@@ -491,11 +501,16 @@ def evaluate_expression(expression: str) -> float | int:
     except SyntaxError as exc:
         raise ValueError("invalid arithmetic expression") from exc
 
-    return _evaluate_ast_node(tree.body)
+    try:
+        return _evaluate_ast_node(tree.body)
+    except ZeroDivisionError as exc:
+        raise ValueError("division by zero") from exc
 
 
 def _evaluate_ast_node(node: ast.AST) -> float | int:
     if isinstance(node, ast.Constant) and isinstance(node.value, int | float):
+        if isinstance(node.value, bool):
+            raise ValueError("unsupported arithmetic constant")
         return node.value
 
     if isinstance(node, ast.BinOp):

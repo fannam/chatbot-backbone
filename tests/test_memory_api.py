@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from fastapi import status
@@ -9,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from chatbot_api.auth import AuthenticatedUser
 from chatbot_api.main import app, get_authenticated_user, get_chat_repository, get_memory_repository
 from chatbot_api.models import utcnow
+from chatbot_api.observability import configure_json_logger
 from chatbot_api.repositories import ConversationSummaryRecord, MemoryRecord, PersistedExchange
 
 
@@ -150,6 +153,35 @@ async def async_client() -> AsyncClient:
         yield client
 
 
+class ListLogHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def audit_log_handler() -> ListLogHandler:
+    # `configure_json_logger` clears existing handlers the first time it runs
+    # for the process; force it to run before attaching ours so this fixture
+    # doesn't depend on some other test having already triggered it first.
+    configure_json_logger()
+    handler = ListLogHandler()
+    logger = logging.getLogger("chatbot_api")
+    logger.addHandler(handler)
+    yield handler
+    logger.removeHandler(handler)
+
+
+def find_log_event(handler: ListLogHandler, event: str) -> dict[str, Any]:
+    for record in handler.records:
+        if isinstance(record.msg, dict) and record.msg.get("event") == event:
+            return record.msg
+    raise AssertionError(f"no log event named {event!r} was captured")
+
+
 @pytest.mark.anyio
 async def test_get_conversation_memory_returns_summary(
     async_client: AsyncClient,
@@ -262,6 +294,7 @@ async def test_list_user_memories_returns_active_items(
 async def test_delete_user_memory_returns_no_content_and_removes_item(
     async_client: AsyncClient,
     clear_dependency_overrides: None,
+    audit_log_handler: ListLogHandler,
 ) -> None:
     now = utcnow()
     memory_repository = StubMemoryRepository(
@@ -292,11 +325,35 @@ async def test_delete_user_memory_returns_no_content_and_removes_item(
     assert response.status_code == status.HTTP_204_NO_CONTENT
     assert memory_repository.memories_by_user["user-123"] == []
 
+    logged_event = find_log_event(audit_log_handler, "memory.delete.completed")
+    assert logged_event["user_id"] == "user-123"
+    assert logged_event["memory_id"] == 9
+
+
+@pytest.mark.anyio
+async def test_delete_user_memory_logs_rejection_for_missing_memory(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+    audit_log_handler: ListLogHandler,
+) -> None:
+    app.dependency_overrides[get_memory_repository] = build_memory_repository_override(
+        StubMemoryRepository()
+    )
+
+    response = await async_client.delete("/users/user-123/memories/999")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    logged_event = find_log_event(audit_log_handler, "memory.delete.rejected")
+    assert logged_event["user_id"] == "user-123"
+    assert logged_event["memory_id"] == 999
+
 
 @pytest.mark.anyio
 async def test_list_user_memories_forbids_access_to_other_user_when_authenticated(
     async_client: AsyncClient,
     clear_dependency_overrides: None,
+    audit_log_handler: ListLogHandler,
 ) -> None:
     app.dependency_overrides[get_memory_repository] = build_memory_repository_override(
         StubMemoryRepository()
@@ -316,6 +373,10 @@ async def test_list_user_memories_forbids_access_to_other_user_when_authenticate
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json() == {"detail": "forbidden"}
+
+    logged_event = find_log_event(audit_log_handler, "memory.access.forbidden")
+    assert logged_event["requested_user_id"] == "user-other"
+    assert logged_event["authenticated_user_id"] == "user-self"
 
 
 @pytest.mark.anyio

@@ -278,6 +278,22 @@ It returns the newest tool runs first, supports `limit` from `1` to `100`, and
 returns `404` when the conversation does not exist or belongs to a different
 authenticated user.
 
+## Request limits
+
+Every request passes through a general request size limit middleware before it
+reaches any route handler. Requests whose declared or actual body size exceeds
+`REQUEST_MAX_BODY_BYTES` (default 10 MiB) are rejected with `413 Request Entity
+Too Large`. This is independent of `DOCUMENT_MAX_BYTES`, which is a friendlier,
+document-specific validation error applied after `POST /documents` has already
+read the file.
+
+Set `RATE_LIMIT_ENABLED=true` to enable per-API-key (or per-client-IP when
+unauthenticated) rate limiting, capped at `RATE_LIMIT_REQUESTS_PER_MINUTE`
+requests per rolling 60-second window. Requests over the limit receive `429 Too
+Many Requests` with a `Retry-After` header. `GET /health` and `GET /metrics` are
+always exempt. Rate limit state is in-process only; it resets on restart and is
+not shared across multiple API replicas.
+
 ## Memory debug endpoints
 
 Phase 5 keeps `/chat` unchanged and exposes memory through separate debug
@@ -319,7 +335,14 @@ curl http://localhost:8000/metrics
 Current metrics include HTTP request totals/latency, chat request totals/latency,
 workflow totals, provider LLM request totals/latency, LLM token/cost counters,
 tool execution totals/latency, retrieval hit counters, document upload totals,
-and document embedding job totals/latency.
+document embedding job totals/latency, and API key authentication attempt totals.
+
+Sensitive actions are logged as structured audit events through the same JSON log
+stream (filterable by `event` name): `auth.failed` (missing/invalid API key, with
+`reason` and, for invalid keys, `api_key_prefix`), `memory.access.forbidden`
+(cross-user access rejected on the memory debug endpoints), and
+`memory.delete.completed`/`memory.delete.rejected`. Document upload events
+(`document.upload.*`) also carry `owner_user_id` when auth is enabled.
 
 Observability-related environment variables:
 
@@ -553,6 +576,8 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `OPENAI_EMBEDDING_MODEL`: defaults to `text-embedding-3-small`
 - `LLM_TIMEOUT_SECONDS`: request timeout for the upstream LLM call
 - `DOCUMENT_MAX_BYTES`: upload size limit for `POST /documents`
+- `REQUEST_MAX_BODY_BYTES`: general request body size limit enforced by middleware
+  for every endpoint, ahead of any per-endpoint validation
 - `DOCUMENT_CHUNK_SIZE_CHARS`: target chunk size for stored document chunks
 - `DOCUMENT_CHUNK_OVERLAP_CHARS`: overlap between adjacent stored document chunks
 - `DOCUMENT_EMBEDDING_DIMENSIONS`: embedding vector size for stored chunks
@@ -567,6 +592,10 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `TOOL_EXECUTION_TIMEOUT_SECONDS`: timeout applied to one tool execution
 - `TOOL_SEARCH_TOP_K`: default top-k used by the knowledge-base search tool
 - `AUTH_ENABLED`: require `X-API-Key` for stateful API endpoints
+- `RATE_LIMIT_ENABLED`: enable per-API-key (or per-IP when unauthenticated)
+  request rate limiting middleware
+- `RATE_LIMIT_REQUESTS_PER_MINUTE`: request budget per rolling 60-second window
+  when rate limiting is enabled
 - `MEMORY_ENABLED`: enables short-term and long-term memory nodes in the workflow
 - `MEMORY_RECENT_MESSAGE_WINDOW`: number of newest raw messages kept outside the rolling summary
 - `MEMORY_SUMMARY_TRIGGER_MESSAGES`: unsummarized message count required before refreshing the rolling summary

@@ -20,6 +20,7 @@ from chatbot_api.chat_eval import (
     run_chat_eval,
 )
 from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.eval_common import unique_preserving_order, write_report
 from chatbot_api.memory_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_MEMORY_DATASET_PATH,
 )
@@ -99,17 +100,6 @@ class EvalSuiteReport(BaseModel):
     memory_summary: MemoryEvalSummary | None
     passed: bool
     failure_reasons: list[str]
-
-
-def unique_preserving_order(values: Sequence[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        ordered.append(value)
-    return ordered
 
 
 def collect_required_filenames(
@@ -355,12 +345,6 @@ async def run_eval_suite(
     )
     write_report(resolved_output_dir / DEFAULT_SUITE_REPORT_FILENAME, report)
     return report
-
-
-def write_report(path: str | Path, report: EvalSuiteReport) -> None:
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 
 
 def exit_code_for_report(report: EvalSuiteReport) -> int:

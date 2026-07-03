@@ -30,6 +30,7 @@ class ChatWorkflowRuntime:
             return workflow
 
     async def close(self) -> None:
+        self._workflow = None
         if self._checkpointer_cm is None:
             return
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from time import perf_counter
+from time import perf_counter, time
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
@@ -12,7 +13,13 @@ from langsmith.middleware import TracingMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import Headers, MutableHeaders
 
-from chatbot_api.auth import AuthenticatedUser, is_forbidden_owner, owner_user_id_of
+from chatbot_api.auth import (
+    AuthenticatedUser,
+    build_api_key_prefix,
+    hash_api_key,
+    is_forbidden_owner,
+    owner_user_id_of,
+)
 from chatbot_api.database import create_database_engine, create_session_factory
 from chatbot_api.document_ingestion import (
     DefaultDocumentTextExtractor,
@@ -193,6 +200,126 @@ class ObservabilityMiddleware:
             raise
 
 
+class RequestBodyTooLargeError(Exception):
+    """Raised internally when a streamed request body exceeds the configured limit."""
+
+
+async def send_request_body_too_large(send) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [(b"content-type", b"application/json")],
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": json.dumps({"detail": "request body too large"}).encode("utf-8"),
+        }
+    )
+
+
+class RequestSizeLimitMiddleware:
+    def __init__(self, app, *, settings: Settings) -> None:
+        self.app = app
+        self._max_bytes = settings.request_max_body_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(raw=scope["headers"])
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = None
+            if declared_bytes is not None and declared_bytes > self._max_bytes:
+                await send_request_body_too_large(send)
+                return
+
+        received_bytes = 0
+
+        async def receive_wrapper():
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body") or b"")
+                if received_bytes > self._max_bytes:
+                    raise RequestBodyTooLargeError()
+            return message
+
+        try:
+            await self.app(scope, receive_wrapper, send)
+        except RequestBodyTooLargeError:
+            await send_request_body_too_large(send)
+
+
+async def send_rate_limit_exceeded(send, *, retry_after: int) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"retry-after", str(retry_after).encode("ascii")),
+            ],
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": json.dumps({"detail": "rate limit exceeded"}).encode("utf-8"),
+        }
+    )
+
+
+class RateLimitMiddleware:
+    EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+    WINDOW_SECONDS = 60.0
+
+    def __init__(self, app, *, settings: Settings) -> None:
+        self.app = app
+        self._limit = settings.rate_limit_requests_per_minute
+        self._counters: dict[str, tuple[float, int]] = {}
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["path"] in self.EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        key = self._resolve_key(scope)
+        now = time()
+        window_start, count = self._counters.get(key, (now, 0))
+        if now - window_start >= self.WINDOW_SECONDS:
+            window_start, count = now, 0
+
+        count += 1
+        self._counters[key] = (window_start, count)
+
+        if count > self._limit:
+            retry_after = max(1, int(self.WINDOW_SECONDS - (now - window_start)))
+            await send_rate_limit_exceeded(send, retry_after=retry_after)
+            return
+
+        await self.app(scope, receive, send)
+
+    def _resolve_key(self, scope) -> str:
+        headers = Headers(raw=scope["headers"])
+        api_key = headers.get("x-api-key")
+        if api_key and api_key.strip():
+            return f"key:{hash_api_key(api_key.strip())}"
+
+        client = scope.get("client")
+        if client:
+            return f"ip:{client[0]}"
+
+        return "ip:unknown"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -206,6 +333,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        chat_provider = getattr(app.state, "chat_provider", None)
+        if chat_provider is not None:
+            await chat_provider.aclose()
+        embedding_provider = getattr(app.state, "embedding_provider", None)
+        if embedding_provider is not None:
+            await embedding_provider.aclose()
         app.state.trace_sink.close()
         await app.state.chat_workflow_runtime.close()
         await engine.dispose()
@@ -215,6 +348,9 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.add_middleware(ObservabilityMiddleware, settings=settings)
+    app.add_middleware(RequestSizeLimitMiddleware, settings=settings)
+    if settings.rate_limit_enabled:
+        app.add_middleware(RateLimitMiddleware, settings=settings)
     if is_langsmith_tracing_configured(settings):
         app.add_middleware(TracingMiddleware)
 
@@ -584,12 +720,13 @@ def create_app() -> FastAPI:
         authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> DocumentUploadResponse:
         started_at = perf_counter()
+        owner_user_id = owner_user_id_of(authenticated_user)
         try:
             document, chunk_count = await service.ingest_document(
                 filename=file.filename or "upload",
                 content_type=file.content_type,
                 content=await file.read(),
-                owner_user_id=owner_user_id_of(authenticated_user),
+                owner_user_id=owner_user_id,
             )
             try:
                 task_queue.enqueue_embed_document(document.id)
@@ -604,6 +741,7 @@ def create_app() -> FastAPI:
                     level="error",
                     filename=document.filename,
                     document_id=document.id,
+                    owner_user_id=owner_user_id,
                     duration_ms=(perf_counter() - started_at) * 1000,
                     outcome="enqueue_failed",
                     error=str(exc),
@@ -619,6 +757,7 @@ def create_app() -> FastAPI:
                 "document.upload.rejected",
                 level="warning",
                 filename=file.filename or "upload",
+                owner_user_id=owner_user_id,
                 duration_ms=(perf_counter() - started_at) * 1000,
                 outcome="validation_error",
                 error=str(exc),
@@ -631,6 +770,7 @@ def create_app() -> FastAPI:
                 "document.upload.rejected",
                 level="warning",
                 filename=file.filename or "upload",
+                owner_user_id=owner_user_id,
                 duration_ms=(perf_counter() - started_at) * 1000,
                 outcome="validation_error",
                 error=str(exc),
@@ -643,6 +783,7 @@ def create_app() -> FastAPI:
                 "document.upload.rejected",
                 level="warning",
                 filename=file.filename or "upload",
+                owner_user_id=owner_user_id,
                 duration_ms=(perf_counter() - started_at) * 1000,
                 outcome="validation_error",
                 error=str(exc),
@@ -655,6 +796,7 @@ def create_app() -> FastAPI:
                 "document.upload.failed",
                 level="error",
                 filename=file.filename or "upload",
+                owner_user_id=owner_user_id,
                 duration_ms=(perf_counter() - started_at) * 1000,
                 outcome="error",
                 error=str(exc),
@@ -669,6 +811,7 @@ def create_app() -> FastAPI:
             "document.upload.completed",
             filename=document.filename,
             document_id=document.id,
+            owner_user_id=owner_user_id,
             duration_ms=(perf_counter() - started_at) * 1000,
             chunk_count=chunk_count,
             status=document.status,
@@ -749,8 +892,15 @@ def create_app() -> FastAPI:
         memory_repository: MemoryRepository = Depends(get_memory_repository),
         settings: Settings = Depends(get_settings),
         authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
+        observability: ObservabilityService = Depends(get_observability),
     ) -> UserMemoriesResponse:
         if is_forbidden_owner(authenticated_user, user_id):
+            observability.log_event(
+                "memory.access.forbidden",
+                level="warning",
+                requested_user_id=user_id,
+                authenticated_user_id=owner_user_id_of(authenticated_user),
+            )
             raise HTTPException(status_code=403, detail="forbidden")
         memories = await memory_repository.list_active_memories(
             user_id,
@@ -771,13 +921,27 @@ def create_app() -> FastAPI:
         memory_id: int,
         memory_repository: MemoryRepository = Depends(get_memory_repository),
         authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
+        observability: ObservabilityService = Depends(get_observability),
     ) -> None:
         if is_forbidden_owner(authenticated_user, user_id):
+            observability.log_event(
+                "memory.access.forbidden",
+                level="warning",
+                requested_user_id=user_id,
+                authenticated_user_id=owner_user_id_of(authenticated_user),
+            )
             raise HTTPException(status_code=403, detail="forbidden")
         deleted = await memory_repository.delete_memory(
             user_id=user_id,
             memory_id=memory_id,
             owner_user_id=owner_user_id_of(authenticated_user),
+        )
+        observability.log_event(
+            "memory.delete.completed" if deleted else "memory.delete.rejected",
+            level="info" if deleted else "warning",
+            user_id=user_id,
+            memory_id=memory_id,
+            authenticated_user_id=owner_user_id_of(authenticated_user),
         )
         if not deleted:
             raise HTTPException(status_code=404, detail="memory not found")
@@ -823,22 +987,34 @@ async def get_trace_sink(
 
 
 async def get_chat_provider(
+    request: Request,
     settings: Settings = Depends(get_settings),
     trace_sink: TraceSink = Depends(get_trace_sink),
 ) -> ChatProvider:
-    try:
-        return OpenAIChatProvider(settings, trace_sink=trace_sink)
-    except ChatProviderConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    chat_provider = getattr(request.app.state, "chat_provider", None)
+    if chat_provider is None:
+        try:
+            chat_provider = OpenAIChatProvider(settings, trace_sink=trace_sink)
+        except ChatProviderConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        request.app.state.chat_provider = chat_provider
+
+    return chat_provider
 
 
 async def get_embedding_provider(
+    request: Request,
     settings: Settings = Depends(get_settings),
 ) -> EmbeddingProvider:
-    try:
-        return OpenAIEmbeddingProvider(settings)
-    except EmbeddingProviderConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    embedding_provider = getattr(request.app.state, "embedding_provider", None)
+    if embedding_provider is None:
+        try:
+            embedding_provider = OpenAIEmbeddingProvider(settings)
+        except EmbeddingProviderConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        request.app.state.embedding_provider = embedding_provider
+
+    return embedding_provider
 
 
 async def get_session_factory(
@@ -868,20 +1044,40 @@ async def get_auth_repository(
     return SqlAlchemyAuthRepository(session)
 
 
+async def get_observability(
+    request: Request,
+) -> ObservabilityService:
+    return get_app_observability(request.app)
+
+
 async def get_authenticated_user(
     request: Request,
     settings: Settings = Depends(get_settings),
     repository: SqlAlchemyAuthRepository = Depends(get_auth_repository),
+    observability: ObservabilityService = Depends(get_observability),
 ) -> AuthenticatedUser | None:
     if not settings.auth_enabled:
         return None
 
     api_key = request.headers.get("X-API-Key")
     if api_key is None or not api_key.strip():
+        observability.record_auth_attempt(outcome="missing_key")
+        observability.log_event(
+            "auth.failed",
+            level="warning",
+            reason="missing_api_key",
+        )
         raise HTTPException(status_code=401, detail="missing API key")
 
     authenticated_user = await repository.authenticate_api_key(api_key.strip())
     if authenticated_user is None:
+        observability.record_auth_attempt(outcome="invalid_key")
+        observability.log_event(
+            "auth.failed",
+            level="warning",
+            reason="invalid_api_key",
+            api_key_prefix=build_api_key_prefix(api_key.strip()),
+        )
         raise HTTPException(status_code=401, detail="invalid API key")
 
     return authenticated_user
@@ -934,12 +1130,6 @@ async def get_document_service(
 
 async def get_document_task_queue() -> DocumentTaskQueue:
     return CeleryDocumentTaskQueue()
-
-
-async def get_observability(
-    request: Request,
-) -> ObservabilityService:
-    return get_app_observability(request.app)
 
 
 async def get_document_retriever(

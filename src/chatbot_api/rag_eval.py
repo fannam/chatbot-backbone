@@ -16,6 +16,7 @@ from chatbot_api.eval_common import (
     safe_ratio,
     source_matches_reference,
     unique_preserving_order,
+    write_report,
 )
 from chatbot_api.repositories import RetrievedDocumentChunk, SqlAlchemyDocumentRepository
 from chatbot_api.retrieval import DocumentRetriever
@@ -291,6 +292,7 @@ async def run_retrieval_eval(
     dataset = load_retrieval_eval_dataset(dataset_path)
     engine = create_database_engine(resolved_settings.database_url)
     session_factory = create_session_factory(engine)
+    owns_embedding_provider = embedding_provider is None
     resolved_embedding_provider = embedding_provider or OpenAIEmbeddingProvider(resolved_settings)
 
     try:
@@ -306,6 +308,8 @@ async def run_retrieval_eval(
             )
             case_reports = await evaluate_retrieval_dataset(dataset.cases, retriever)
     finally:
+        if owns_embedding_provider:
+            await resolved_embedding_provider.aclose()
         await engine.dispose()
 
     report = build_report(
@@ -316,12 +320,6 @@ async def run_retrieval_eval(
     if output_path is not None:
         write_report(output_path, report)
     return report
-
-
-def write_report(path: str | Path, report: RetrievalEvalReport) -> None:
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 
 
 def format_summary(report: RetrievalEvalReport) -> str:

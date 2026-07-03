@@ -40,6 +40,9 @@ class OpenAIEmbeddingProvider:
             timeout=settings.llm_timeout_seconds,
         )
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         normalized_texts = [text.strip() for text in texts if text.strip()]
         if not normalized_texts:

@@ -1259,11 +1259,11 @@ def merge_citations(
         for citation in existing
     }
     for citation in additions:
+        if len(merged) >= MAX_METADATA_CITATIONS:
+            break
         key = (citation["document_id"], citation["chunk_index"])
         if key in seen:
             continue
         merged.append(citation)
         seen.add(key)
-        if len(merged) >= MAX_METADATA_CITATIONS:
-            break
     return merged

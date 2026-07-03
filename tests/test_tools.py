@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from chatbot_api.providers import ToolCallRequest
 from chatbot_api.repositories import RetrievedDocumentChunk
-from chatbot_api.tools import ToolExecutionContext, build_tool_registry, evaluate_expression
+from chatbot_api.tools import (
+    RegisteredTool,
+    ToolExecutionContext,
+    ToolRegistry,
+    build_tool_registry,
+    evaluate_expression,
+)
 
 
 class StubRetriever:
@@ -52,6 +59,26 @@ def test_evaluate_expression_supports_basic_arithmetic() -> None:
 def test_evaluate_expression_rejects_unsafe_syntax() -> None:
     with pytest.raises(ValueError, match="unsupported|invalid"):
         evaluate_expression("__import__('os').system('whoami')")
+
+
+def test_evaluate_expression_rejects_unbounded_exponentiation() -> None:
+    with pytest.raises(ValueError, match="too large"):
+        evaluate_expression("9**9**9")
+
+
+def test_evaluate_expression_allows_reasonably_large_exponents() -> None:
+    assert evaluate_expression("2 ** 10") == 1024
+    assert evaluate_expression("10 ** 100") == 10**100
+
+
+def test_evaluate_expression_rejects_boolean_constants() -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        evaluate_expression("True + 1")
+
+
+def test_evaluate_expression_reports_division_by_zero_cleanly() -> None:
+    with pytest.raises(ValueError, match="division by zero"):
+        evaluate_expression("1 / 0")
 
 
 @pytest.mark.anyio
@@ -127,6 +154,48 @@ async def test_tool_registry_rejects_unknown_tool() -> None:
 
     assert result.tool_run.status == "rejected"
     assert result.tool_run.error == "tool 'not_allowed' is not allowlisted"
+
+
+class WrongOutput(BaseModel):
+    unexpected: str = "oops"
+
+
+@pytest.mark.anyio
+async def test_tool_registry_reports_failure_when_handler_returns_wrong_output_model() -> None:
+    class ExpectedOutput(BaseModel):
+        value: str = "ok"
+
+    class MisbehavingInput(BaseModel):
+        pass
+
+    async def misbehaving_handler(payload, context):
+        del payload, context
+        return WrongOutput()
+
+    registry = ToolRegistry(
+        [
+            RegisteredTool(
+                name="misbehaving",
+                description="returns the wrong output model",
+                input_model=MisbehavingInput,
+                output_model=ExpectedOutput,
+                handler=misbehaving_handler,
+                timeout_seconds=5.0,
+            )
+        ]
+    )
+
+    result = await registry.execute(
+        ToolCallRequest(call_id="tool-misbehaving", name="misbehaving", arguments={}),
+        context=ToolExecutionContext(
+            conversation_id="conv-misbehaving",
+            owner_user_id=None,
+            request_metadata=None,
+        ),
+    )
+
+    assert result.tool_run.status == "failed"
+    assert "unexpected output model" in result.tool_run.error
 
 
 @pytest.mark.anyio

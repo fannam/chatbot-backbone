@@ -22,6 +22,7 @@ class Settings(BaseModel):
     openai_model_output_price_per_1m_tokens: float | None = 1.60
     llm_timeout_seconds: float = 30.0
     document_max_bytes: int = 5_242_880
+    request_max_body_bytes: int = 10_485_760
     document_chunk_size_chars: int = 1200
     document_chunk_overlap_chars: int = 200
     document_embedding_dimensions: int = 1536
@@ -36,6 +37,8 @@ class Settings(BaseModel):
     tool_execution_timeout_seconds: float = 15.0
     tool_search_top_k: int = 3
     auth_enabled: bool = False
+    rate_limit_enabled: bool = False
+    rate_limit_requests_per_minute: int = 60
     memory_enabled: bool = True
     memory_recent_message_window: int = 6
     memory_summary_trigger_messages: int = 12
@@ -110,6 +113,7 @@ def get_settings() -> Settings:
         ),
         llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
         document_max_bytes=int(os.getenv("DOCUMENT_MAX_BYTES", "5242880")),
+        request_max_body_bytes=int(os.getenv("REQUEST_MAX_BODY_BYTES", "10485760")),
         document_chunk_size_chars=int(os.getenv("DOCUMENT_CHUNK_SIZE_CHARS", "1200")),
         document_chunk_overlap_chars=int(
             os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", "200")
@@ -138,6 +142,10 @@ def get_settings() -> Settings:
         ),
         tool_search_top_k=int(os.getenv("TOOL_SEARCH_TOP_K", "3")),
         auth_enabled=parse_bool_env("AUTH_ENABLED", False),
+        rate_limit_enabled=parse_bool_env("RATE_LIMIT_ENABLED", False),
+        rate_limit_requests_per_minute=int(
+            os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60")
+        ),
         memory_enabled=parse_bool_env("MEMORY_ENABLED", True),
         memory_recent_message_window=int(os.getenv("MEMORY_RECENT_MESSAGE_WINDOW", "6")),
         memory_summary_trigger_messages=int(

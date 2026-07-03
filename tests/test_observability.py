@@ -189,6 +189,18 @@ async def test_chat_success_updates_metrics(async_client: AsyncClient) -> None:
     assert 'chat_requests_total{mode="sync",outcome="success"} 1' in metrics_response.text
 
 
+def test_record_auth_attempt_updates_metrics_by_outcome() -> None:
+    observability = ObservabilityService(Settings())
+
+    observability.record_auth_attempt(outcome="missing_key")
+    observability.record_auth_attempt(outcome="invalid_key")
+    observability.record_auth_attempt(outcome="invalid_key")
+
+    metrics_output = observability.render_metrics()
+    assert 'auth_attempts_total{outcome="missing_key"} 1' in metrics_output
+    assert 'auth_attempts_total{outcome="invalid_key"} 2' in metrics_output
+
+
 def test_structured_logs_include_request_id() -> None:
     context_token = bind_request_context(request_id="req-log-1")
     try:
