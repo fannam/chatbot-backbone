@@ -34,12 +34,23 @@ def utcnow() -> datetime:
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index("ix_conversations_owner_user_id_id", "owner_user_id", "id"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation")
     tool_runs: Mapped[list["ToolRun"]] = relationship(back_populates="conversation")
+    summary: Mapped["ConversationSummary | None"] = relationship(
+        back_populates="conversation",
+        uselist=False,
+    )
 
 
 class Message(Base):
@@ -95,6 +106,61 @@ class ToolRun(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="tool_runs")
 
 
+class ConversationSummary(Base):
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (
+        Index("ix_conversation_summaries_last_summarized_message_id", "last_summarized_message_id"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    last_summarized_message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    conversation: Mapped[Conversation] = relationship(back_populates="summary")
+
+
+class Memory(Base):
+    __tablename__ = "memories"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('profile', 'preference')",
+            name="ck_memories_kind",
+        ),
+        CheckConstraint(
+            "extraction_method IN ('rule', 'llm')",
+            name="ck_memories_extraction_method",
+        ),
+        Index("ix_memories_user_id_id", "user_id", "id"),
+        Index("ix_memories_user_id_key", "user_id", "key"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    value_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    confidence: Mapped[float] = mapped_column(nullable=False)
+    source_message_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        nullable=False,
+    )
+    extraction_method: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
@@ -102,9 +168,14 @@ class Document(Base):
             "status IN ('processing', 'ready', 'failed')",
             name="ck_documents_status",
         ),
+        Index("ix_documents_owner_user_id_id", "owner_user_id", "id"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     filename: Mapped[str] = mapped_column(Text, nullable=False)
     content_type: Mapped[str] = mapped_column(Text, nullable=False)
     byte_size: Mapped[int] = mapped_column(
@@ -148,3 +219,48 @@ class DocumentChunk(Base):
     metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_email", "email", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preferences_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON(none_as_null=True),
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        Index("ix_api_keys_user_id_id", "user_id", "id"),
+        Index("ix_api_keys_key_hash", "key_hash", unique=True),
+        Index("ix_api_keys_key_prefix", "key_prefix"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

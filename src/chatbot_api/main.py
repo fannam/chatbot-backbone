@@ -12,6 +12,7 @@ from langsmith.middleware import TracingMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import Headers, MutableHeaders
 
+from chatbot_api.auth import AuthenticatedUser, is_forbidden_owner, owner_user_id_of
 from chatbot_api.database import create_database_engine, create_session_factory
 from chatbot_api.document_ingestion import (
     DefaultDocumentTextExtractor,
@@ -30,6 +31,7 @@ from chatbot_api.embeddings import (
     EmbeddingProviderTimeoutError,
     OpenAIEmbeddingProvider,
 )
+from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import (
     ObservabilityService,
     bind_request_context,
@@ -51,8 +53,14 @@ from chatbot_api.providers import (
 )
 from chatbot_api.repositories import (
     ChatRepository,
+    ConversationSummaryRecord,
+    MemoryRecord,
+    MemoryRepository,
+    OwnershipError,
+    SqlAlchemyAuthRepository,
     SqlAlchemyChatRepository,
     SqlAlchemyDocumentRepository,
+    SqlAlchemyMemoryRepository,
     ToolRunRecord,
 )
 from chatbot_api.retrieval import DocumentRetriever
@@ -72,10 +80,14 @@ from chatbot_api.schemas import (
     ChatStreamToolStartPayload,
     ChatToolRunPayload,
     ChatUsagePayload,
+    ConversationMemoryResponse,
+    ConversationMemorySummaryPayload,
     ConversationToolRunsResponse,
     DocumentStatusResponse,
     DocumentUploadResponse,
     ToolRunRecordPayload,
+    UserMemoriesResponse,
+    UserMemoryPayload,
 )
 from chatbot_api.services import (
     ChatService,
@@ -298,10 +310,15 @@ def create_app() -> FastAPI:
         service: ChatService = Depends(get_chat_service),
         observability: ObservabilityService = Depends(get_observability),
         trace_sink: TraceSink = Depends(get_trace_sink),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> ChatResponse | EventSourceResponse:
         context_token = bind_request_context(request_id=raw_request.state.request_id)
         try:
-            metadata_fields = build_request_metadata_fields(observability, request.metadata)
+            effective_metadata = merge_request_metadata_with_authenticated_user(
+                request.metadata,
+                authenticated_user,
+            )
+            metadata_fields = build_request_metadata_fields(observability, effective_metadata)
             observability.log_event(
                 "chat.request.started",
                 mode="stream" if request.stream else "sync",
@@ -311,11 +328,16 @@ def create_app() -> FastAPI:
             started_at = perf_counter()
             request_trace_span = trace_sink.start_request_span(
                 "chat.request",
-                inputs=build_chat_request_trace_inputs(request, observability),
+                inputs=build_chat_request_trace_inputs(
+                    request,
+                    observability,
+                    metadata=effective_metadata,
+                ),
                 metadata=build_chat_request_trace_metadata(
                     request=request,
                     request_id=raw_request.state.request_id,
                     observability=observability,
+                    metadata=effective_metadata,
                 ),
                 tags=["chat", "stream" if request.stream else "sync"],
             )
@@ -323,8 +345,9 @@ def create_app() -> FastAPI:
                 request_trace_span.__enter__()
                 stream = service.stream_chat(
                     conversation_id=request.conversation_id,
+                    owner_user_id=owner_user_id_of(authenticated_user),
                     message=request.message,
-                    metadata=request.metadata,
+                    metadata=effective_metadata,
                 )
 
                 try:
@@ -348,7 +371,13 @@ def create_app() -> FastAPI:
                         status_code=502,
                         detail="LLM provider stream ended before completion",
                     ) from exc
-                except ChatProviderTimeoutError as exc:
+                except (
+                    ChatProviderTimeoutError,
+                    ChatProviderError,
+                    EmbeddingProviderTimeoutError,
+                    EmbeddingProviderError,
+                    OwnershipError,
+                ) as exc:
                     record_failed_chat_request(
                         observability,
                         mode="stream",
@@ -363,55 +392,8 @@ def create_app() -> FastAPI:
                             "request_id": raw_request.state.request_id,
                         },
                     )
-                    raise HTTPException(status_code=504, detail=str(exc)) from exc
-                except ChatProviderError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="stream",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.finish_error(
-                        exc,
-                        metadata={
-                            "chat_mode": "stream",
-                            "request_id": raw_request.state.request_id,
-                        },
-                    )
-                    raise HTTPException(status_code=502, detail=str(exc)) from exc
-                except EmbeddingProviderTimeoutError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="stream",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.finish_error(
-                        exc,
-                        metadata={
-                            "chat_mode": "stream",
-                            "request_id": raw_request.state.request_id,
-                        },
-                    )
-                    raise HTTPException(status_code=504, detail=str(exc)) from exc
-                except EmbeddingProviderError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="stream",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.finish_error(
-                        exc,
-                        metadata={
-                            "chat_mode": "stream",
-                            "request_id": raw_request.state.request_id,
-                        },
-                    )
-                    raise HTTPException(status_code=502, detail=str(exc)) from exc
+                    status_code, detail = resolve_chat_error_response(exc)
+                    raise HTTPException(status_code=status_code, detail=detail) from exc
 
                 request_trace_span.annotate(
                     metadata={
@@ -491,25 +473,12 @@ def create_app() -> FastAPI:
                             if isinstance(event, ChatStreamComplete):
                                 completion = event.completion
                             yield serialize_stream_event(event)
-                    except ChatProviderTimeoutError as exc:
-                        finalize_stream(outcome="error", error_detail=str(exc))
-                        yield format_sse_event(
-                            event="error",
-                            data_str=ChatStreamErrorPayload(detail=str(exc)).model_dump_json(),
-                        )
-                    except ChatProviderError as exc:
-                        finalize_stream(outcome="error", error_detail=str(exc))
-                        yield format_sse_event(
-                            event="error",
-                            data_str=ChatStreamErrorPayload(detail=str(exc)).model_dump_json(),
-                        )
-                    except EmbeddingProviderTimeoutError as exc:
-                        finalize_stream(outcome="error", error_detail=str(exc))
-                        yield format_sse_event(
-                            event="error",
-                            data_str=ChatStreamErrorPayload(detail=str(exc)).model_dump_json(),
-                        )
-                    except EmbeddingProviderError as exc:
+                    except (
+                        ChatProviderTimeoutError,
+                        ChatProviderError,
+                        EmbeddingProviderTimeoutError,
+                        EmbeddingProviderError,
+                    ) as exc:
                         finalize_stream(outcome="error", error_detail=str(exc))
                         yield format_sse_event(
                             event="error",
@@ -537,10 +506,17 @@ def create_app() -> FastAPI:
                 try:
                     conversation_id, completion = await service.chat(
                         conversation_id=request.conversation_id,
+                        owner_user_id=owner_user_id_of(authenticated_user),
                         message=request.message,
-                        metadata=request.metadata,
+                        metadata=effective_metadata,
                     )
-                except ChatProviderTimeoutError as exc:
+                except (
+                    ChatProviderTimeoutError,
+                    ChatProviderError,
+                    EmbeddingProviderTimeoutError,
+                    EmbeddingProviderError,
+                    OwnershipError,
+                ) as exc:
                     record_failed_chat_request(
                         observability,
                         mode="sync",
@@ -556,58 +532,8 @@ def create_app() -> FastAPI:
                             "outcome": "error",
                         }
                     )
-                    raise HTTPException(status_code=504, detail=str(exc)) from exc
-                except ChatProviderError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="sync",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.annotate(
-                        metadata={
-                            "conversation_id": request.conversation_id,
-                            "chat_mode": "sync",
-                            "request_id": raw_request.state.request_id,
-                            "outcome": "error",
-                        }
-                    )
-                    raise HTTPException(status_code=502, detail=str(exc)) from exc
-                except EmbeddingProviderTimeoutError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="sync",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.annotate(
-                        metadata={
-                            "conversation_id": request.conversation_id,
-                            "chat_mode": "sync",
-                            "request_id": raw_request.state.request_id,
-                            "outcome": "error",
-                        }
-                    )
-                    raise HTTPException(status_code=504, detail=str(exc)) from exc
-                except EmbeddingProviderError as exc:
-                    record_failed_chat_request(
-                        observability,
-                        mode="sync",
-                        started_at=started_at,
-                        conversation_id=request.conversation_id,
-                        error_detail=str(exc),
-                    )
-                    request_trace_span.annotate(
-                        metadata={
-                            "conversation_id": request.conversation_id,
-                            "chat_mode": "sync",
-                            "request_id": raw_request.state.request_id,
-                            "outcome": "error",
-                        }
-                    )
-                    raise HTTPException(status_code=502, detail=str(exc)) from exc
+                    status_code, detail = resolve_chat_error_response(exc)
+                    raise HTTPException(status_code=status_code, detail=detail) from exc
 
                 duration_seconds = perf_counter() - started_at
                 observability.record_chat_request(
@@ -655,6 +581,7 @@ def create_app() -> FastAPI:
         repository: SqlAlchemyDocumentRepository = Depends(get_document_repository),
         task_queue: DocumentTaskQueue = Depends(get_document_task_queue),
         observability: ObservabilityService = Depends(get_observability),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> DocumentUploadResponse:
         started_at = perf_counter()
         try:
@@ -662,6 +589,7 @@ def create_app() -> FastAPI:
                 filename=file.filename or "upload",
                 content_type=file.content_type,
                 content=await file.read(),
+                owner_user_id=owner_user_id_of(authenticated_user),
             )
             try:
                 task_queue.enqueue_embed_document(document.id)
@@ -765,11 +693,17 @@ def create_app() -> FastAPI:
         conversation_id: str,
         limit: int = Query(default=50, ge=1, le=100),
         repository: ChatRepository = Depends(get_chat_repository),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> ConversationToolRunsResponse:
-        if not await repository.conversation_exists(conversation_id):
+        owner_user_id = owner_user_id_of(authenticated_user)
+        if not await repository.conversation_exists(conversation_id, owner_user_id=owner_user_id):
             raise HTTPException(status_code=404, detail="conversation not found")
 
-        tool_runs = await repository.list_tool_runs(conversation_id, limit=limit)
+        tool_runs = await repository.list_tool_runs(
+            conversation_id,
+            limit=limit,
+            owner_user_id=owner_user_id,
+        )
         return ConversationToolRunsResponse(
             conversation_id=conversation_id,
             tool_runs=[
@@ -779,6 +713,76 @@ def create_app() -> FastAPI:
         )
 
     @app.get(
+        "/conversations/{conversation_id}/memory",
+        response_model=ConversationMemoryResponse,
+        response_model_exclude_none=True,
+    )
+    async def get_conversation_memory(
+        conversation_id: str,
+        chat_repository: ChatRepository = Depends(get_chat_repository),
+        memory_repository: MemoryRepository = Depends(get_memory_repository),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
+    ) -> ConversationMemoryResponse:
+        owner_user_id = owner_user_id_of(authenticated_user)
+        if not await chat_repository.conversation_exists(
+            conversation_id,
+            owner_user_id=owner_user_id,
+        ):
+            raise HTTPException(status_code=404, detail="conversation not found")
+
+        summary = await memory_repository.get_conversation_summary(
+            conversation_id,
+            owner_user_id=owner_user_id,
+        )
+        return ConversationMemoryResponse(
+            conversation_id=conversation_id,
+            summary=None if summary is None else serialize_conversation_summary(summary),
+        )
+
+    @app.get(
+        "/users/{user_id}/memories",
+        response_model=UserMemoriesResponse,
+        response_model_exclude_none=True,
+    )
+    async def list_user_memories(
+        user_id: str,
+        memory_repository: MemoryRepository = Depends(get_memory_repository),
+        settings: Settings = Depends(get_settings),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
+    ) -> UserMemoriesResponse:
+        if is_forbidden_owner(authenticated_user, user_id):
+            raise HTTPException(status_code=403, detail="forbidden")
+        memories = await memory_repository.list_active_memories(
+            user_id,
+            limit=settings.memory_max_active_items,
+            owner_user_id=owner_user_id_of(authenticated_user),
+        )
+        return UserMemoriesResponse(
+            user_id=user_id,
+            memories=[serialize_memory_record(memory) for memory in memories],
+        )
+
+    @app.delete(
+        "/users/{user_id}/memories/{memory_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def delete_user_memory(
+        user_id: str,
+        memory_id: int,
+        memory_repository: MemoryRepository = Depends(get_memory_repository),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
+    ) -> None:
+        if is_forbidden_owner(authenticated_user, user_id):
+            raise HTTPException(status_code=403, detail="forbidden")
+        deleted = await memory_repository.delete_memory(
+            user_id=user_id,
+            memory_id=memory_id,
+            owner_user_id=owner_user_id_of(authenticated_user),
+        )
+        if not deleted:
+            raise HTTPException(status_code=404, detail="memory not found")
+
+    @app.get(
         "/documents/{document_id}",
         response_model=DocumentStatusResponse,
         response_model_exclude_none=True,
@@ -786,12 +790,17 @@ def create_app() -> FastAPI:
     async def get_document(
         document_id: str,
         repository: SqlAlchemyDocumentRepository = Depends(get_document_repository),
+        authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> DocumentStatusResponse:
-        document = await repository.get_document(document_id)
+        owner_user_id = owner_user_id_of(authenticated_user)
+        document = await repository.get_document(document_id, owner_user_id=owner_user_id)
         if document is None:
             raise HTTPException(status_code=404, detail="document not found")
 
-        chunk_count = await repository.count_document_chunks(document_id)
+        chunk_count = await repository.count_document_chunks(
+            document_id,
+            owner_user_id=owner_user_id,
+        )
         return DocumentStatusResponse(
             document_id=document.id,
             filename=document.filename,
@@ -853,10 +862,41 @@ async def get_db_session(
         yield session
 
 
+async def get_auth_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> SqlAlchemyAuthRepository:
+    return SqlAlchemyAuthRepository(session)
+
+
+async def get_authenticated_user(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    repository: SqlAlchemyAuthRepository = Depends(get_auth_repository),
+) -> AuthenticatedUser | None:
+    if not settings.auth_enabled:
+        return None
+
+    api_key = request.headers.get("X-API-Key")
+    if api_key is None or not api_key.strip():
+        raise HTTPException(status_code=401, detail="missing API key")
+
+    authenticated_user = await repository.authenticate_api_key(api_key.strip())
+    if authenticated_user is None:
+        raise HTTPException(status_code=401, detail="invalid API key")
+
+    return authenticated_user
+
+
 async def get_chat_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> ChatRepository:
     return SqlAlchemyChatRepository(session)
+
+
+async def get_memory_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> MemoryRepository:
+    return SqlAlchemyMemoryRepository(session)
 
 
 async def get_document_repository(
@@ -948,11 +988,31 @@ async def get_tool_registry(
     )
 
 
+async def get_memory_manager(
+    provider: ChatProvider = Depends(get_chat_provider),
+    chat_repository: ChatRepository = Depends(get_chat_repository),
+    memory_repository: MemoryRepository = Depends(get_memory_repository),
+    settings: Settings = Depends(get_settings),
+    trace_sink: TraceSink = Depends(get_trace_sink),
+) -> MemoryManager | None:
+    if not settings.memory_enabled:
+        return None
+
+    return MemoryManager(
+        provider=provider,
+        chat_repository=chat_repository,
+        memory_repository=memory_repository,
+        settings=settings,
+        trace_sink=trace_sink,
+    )
+
+
 async def get_chat_service(
     provider: ChatProvider = Depends(get_chat_provider),
     repository: ChatRepository = Depends(get_chat_repository),
     workflow: ChatWorkflow = Depends(get_chat_workflow),
     tool_registry: ToolRegistry = Depends(get_tool_registry),
+    memory_manager: MemoryManager | None = Depends(get_memory_manager),
     settings: Settings = Depends(get_settings),
     observability: ObservabilityService = Depends(get_observability),
     trace_sink: TraceSink = Depends(get_trace_sink),
@@ -962,6 +1022,7 @@ async def get_chat_service(
         repository,
         workflow,
         tool_registry=tool_registry,
+        memory_manager=memory_manager,
         tool_max_rounds=settings.tool_max_rounds,
         observability=observability,
         pricing_model=settings.openai_model,
@@ -1016,6 +1077,8 @@ def build_request_metadata_fields(
 def build_chat_request_trace_inputs(
     request: ChatRequest,
     observability: ObservabilityService,
+    *,
+    metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "message": request.message,
@@ -1023,11 +1086,11 @@ def build_chat_request_trace_inputs(
     }
     if request.conversation_id is not None:
         payload["requested_conversation_id"] = request.conversation_id
-    if request.metadata is not None:
+    if metadata is not None:
         if observability.include_request_metadata:
-            payload["request_metadata"] = request.metadata
+            payload["request_metadata"] = metadata
         else:
-            payload["metadata_key_count"] = len(request.metadata)
+            payload["metadata_key_count"] = len(metadata)
     return payload
 
 
@@ -1036,17 +1099,45 @@ def build_chat_request_trace_metadata(
     request: ChatRequest,
     request_id: str,
     observability: ObservabilityService,
+    metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "request_id": request_id,
         "chat_mode": "stream" if request.stream else "sync",
-        "has_metadata": request.metadata is not None,
+        "has_metadata": metadata is not None,
     }
     if request.conversation_id is not None:
         payload["requested_conversation_id"] = request.conversation_id
-    if request.metadata is not None and not observability.include_request_metadata:
-        payload["metadata_key_count"] = len(request.metadata)
+    if metadata is not None and not observability.include_request_metadata:
+        payload["metadata_key_count"] = len(metadata)
     return payload
+
+
+def merge_request_metadata_with_authenticated_user(
+    metadata: dict[str, object] | None,
+    authenticated_user: AuthenticatedUser | None,
+) -> dict[str, object] | None:
+    if authenticated_user is None:
+        return metadata
+
+    merged = {} if metadata is None else dict(metadata)
+    merged["user_profile"] = authenticated_user.to_user_profile_metadata()
+    return merged
+
+
+CHAT_ERROR_STATUS_CODES: dict[type[Exception], int] = {
+    ChatProviderTimeoutError: 504,
+    ChatProviderError: 502,
+    EmbeddingProviderTimeoutError: 504,
+    EmbeddingProviderError: 502,
+    OwnershipError: 404,
+}
+
+
+def resolve_chat_error_response(exc: Exception) -> tuple[int, str]:
+    status_code = CHAT_ERROR_STATUS_CODES[type(exc)]
+    detail = "conversation not found" if isinstance(exc, OwnershipError) else str(exc)
+    return status_code, detail
 
 
 def record_failed_chat_request(
@@ -1182,6 +1273,32 @@ def serialize_tool_run_record(tool_run: ToolRunRecord) -> ToolRunRecordPayload:
         error=tool_run.error_message,
         started_at=tool_run.started_at,
         completed_at=tool_run.completed_at,
+    )
+
+
+def serialize_conversation_summary(
+    summary: ConversationSummaryRecord,
+) -> ConversationMemorySummaryPayload:
+    return ConversationMemorySummaryPayload(
+        conversation_id=summary.conversation_id,
+        summary_text=summary.summary_text,
+        last_summarized_message_id=summary.last_summarized_message_id,
+        updated_at=summary.updated_at,
+    )
+
+
+def serialize_memory_record(memory: MemoryRecord) -> UserMemoryPayload:
+    return UserMemoryPayload(
+        id=memory.id,
+        user_id=memory.user_id,
+        kind=memory.kind,
+        key=memory.key,
+        value_json=memory.value_json,
+        confidence=memory.confidence,
+        source_message_id=memory.source_message_id,
+        extraction_method=memory.extraction_method,
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
     )
 
 

@@ -12,8 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from chatbot_api.database import create_database_engine, create_session_factory
 from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
-from chatbot_api.eval_common import ExpectedSource, safe_ratio, source_matches_reference
-from chatbot_api.models import Conversation, Message, utcnow
+from chatbot_api.eval_common import (
+    ExpectedSource,
+    is_deep_subset,
+    safe_ratio,
+    seed_history,
+    source_matches_reference,
+    write_report,
+)
 from chatbot_api.providers import (
     ChatCitation,
     ChatCompletion,
@@ -491,39 +497,6 @@ async def evaluate_chat_case(
     return build_chat_case_report(case, completion)
 
 
-async def seed_history(
-    session,
-    *,
-    conversation_id: str,
-    history: Sequence[ChatEvalHistoryTurn],
-) -> None:
-    timestamp = utcnow()
-    conversation = await session.get(Conversation, conversation_id)
-    if conversation is None:
-        conversation = Conversation(
-            id=conversation_id,
-            created_at=timestamp,
-            updated_at=timestamp,
-        )
-        session.add(conversation)
-    else:
-        conversation.updated_at = timestamp
-
-    session.add_all(
-        [
-            Message(
-                conversation_id=conversation_id,
-                role=turn.role,
-                content=turn.content,
-                metadata_=None,
-                created_at=timestamp,
-            )
-            for turn in history
-        ]
-    )
-    await session.commit()
-
-
 async def build_execution_failure_case_report(
     case: ChatEvalCase,
     *,
@@ -686,28 +659,6 @@ def has_answer_expectations(case: ChatEvalCase) -> bool:
     return bool(case.expected_answer_substrings or case.forbidden_answer_substrings)
 
 
-def is_deep_subset(expected: Any, actual: Any) -> bool:
-    if isinstance(expected, dict):
-        if not isinstance(actual, dict):
-            return False
-        return all(
-            key in actual and is_deep_subset(expected_value, actual[key])
-            for key, expected_value in expected.items()
-        )
-
-    if isinstance(expected, list):
-        if not isinstance(actual, list):
-            return False
-        if len(expected) > len(actual):
-            return False
-        return all(
-            is_deep_subset(expected_item, actual_item)
-            for expected_item, actual_item in zip(expected, actual, strict=True)
-        )
-
-    return expected == actual
-
-
 def build_report(
     *,
     dataset_path: str | Path,
@@ -837,12 +788,6 @@ def token_usage_from_eval(usage: EvalTokenUsage | None) -> TokenUsage | None:
         output_tokens=usage.output_tokens,
         total_tokens=usage.total_tokens,
     )
-
-
-def write_report(path: str | Path, report: ChatEvalReport) -> None:
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
 
 
 def format_summary(report: ChatEvalReport) -> str:

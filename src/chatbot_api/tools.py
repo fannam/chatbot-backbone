@@ -95,6 +95,7 @@ class ToolExecutionResult:
 @dataclass(frozen=True)
 class ToolExecutionContext:
     conversation_id: str
+    owner_user_id: str | None
     request_metadata: dict[str, Any] | None
 
 
@@ -424,7 +425,6 @@ class KnowledgeBaseSearchTool:
         payload: BaseModel,
         context: ToolExecutionContext,
     ) -> KnowledgeBaseSearchToolOutput:
-        del context
         if not isinstance(payload, KnowledgeBaseSearchToolInput):
             raise TypeError("knowledge base search tool received invalid payload")
 
@@ -433,6 +433,7 @@ class KnowledgeBaseSearchTool:
             payload.query,
             top_k=top_k,
             max_chunks_per_document=top_k,
+            owner_user_id=context.owner_user_id,
         )
         return KnowledgeBaseSearchToolOutput(
             hits=[chunk_to_search_hit(chunk) for chunk in chunks]

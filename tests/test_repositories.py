@@ -9,12 +9,26 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from chatbot_api.database import Base
 from chatbot_api.document_ingestion import DocumentChunkCreate
-from chatbot_api.models import Conversation, Document, DocumentChunk, Message, ToolRun
+from chatbot_api.models import (
+    ApiKey,
+    Conversation,
+    ConversationSummary,
+    Document,
+    DocumentChunk,
+    Memory,
+    Message,
+    ToolRun,
+    User,
+    utcnow,
+)
 from chatbot_api.providers import ChatTurn
 from chatbot_api.repositories import (
     ChunkEmbeddingUpdate,
+    OwnershipError,
+    SqlAlchemyAuthRepository,
     SqlAlchemyChatRepository,
     SqlAlchemyDocumentRepository,
+    SqlAlchemyMemoryRepository,
 )
 
 
@@ -203,6 +217,101 @@ async def test_repository_reports_conversation_existence(
 
 
 @pytest.mark.anyio
+async def test_repository_scopes_conversation_access_by_owner_user_id(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add(
+            User(
+                id="user-123",
+                display_name="Alice",
+                email=None,
+                plan=None,
+                locale=None,
+                preferences_json={},
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+        session.commit()
+        repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        await repository.append_exchange(
+            conversation_id="conv-owned",
+            user_message="Hello",
+            user_metadata=None,
+            assistant_message="Hi",
+            owner_user_id="user-123",
+        )
+        owned_exists = await repository.conversation_exists(
+            "conv-owned",
+            owner_user_id="user-123",
+        )
+        foreign_exists = await repository.conversation_exists(
+            "conv-owned",
+            owner_user_id="user-999",
+        )
+    finally:
+        session.close()
+
+    assert owned_exists is True
+    assert foreign_exists is False
+
+
+@pytest.mark.anyio
+async def test_repository_rejects_appending_to_foreign_owned_conversation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add_all(
+            [
+                User(
+                    id="user-123",
+                    display_name="Alice",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                User(
+                    id="user-999",
+                    display_name="Mallory",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+            ]
+        )
+        session.commit()
+        repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        await repository.append_exchange(
+            conversation_id="conv-owned",
+            user_message="Hello",
+            user_metadata=None,
+            assistant_message="Hi",
+            owner_user_id="user-123",
+        )
+        with pytest.raises(OwnershipError):
+            await repository.append_exchange(
+                conversation_id="conv-owned",
+                user_message="Intrude",
+                user_metadata=None,
+                assistant_message="Nope",
+                owner_user_id="user-999",
+            )
+    finally:
+        session.close()
+
+
+@pytest.mark.anyio
 async def test_repository_lists_tool_runs_newest_first_with_limit(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -244,6 +353,288 @@ async def test_repository_lists_tool_runs_newest_first_with_limit(
     assert tool_runs[0].output_payload is None
     assert tool_runs[0].error_message == "search failed"
     assert tool_runs[0].completed_at is not None
+
+
+@pytest.mark.anyio
+async def test_repository_returns_message_records_and_persisted_exchange_ids(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        persisted_exchange = await repository.append_exchange(
+            conversation_id="conv-records",
+            user_message="Remember this",
+            user_metadata={"source": "memory-test"},
+            assistant_message="Stored",
+        )
+        records = await repository.list_message_records("conv-records")
+    finally:
+        session.close()
+
+    assert persisted_exchange.conversation_id == "conv-records"
+    assert persisted_exchange.user_message_id < persisted_exchange.assistant_message_id
+    assert [record.id for record in records] == [
+        persisted_exchange.user_message_id,
+        persisted_exchange.assistant_message_id,
+    ]
+    assert records[0].metadata == {"source": "memory-test"}
+    assert records[1].metadata is None
+
+
+@pytest.mark.anyio
+async def test_memory_repository_upserts_and_reads_conversation_summary(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        chat_repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        memory_repository = SqlAlchemyMemoryRepository(SyncAsyncSessionAdapter(session))
+        persisted_exchange = await chat_repository.append_exchange(
+            conversation_id="conv-summary",
+            user_message="Opening",
+            user_metadata=None,
+            assistant_message="Reply",
+        )
+        created_summary = await memory_repository.upsert_conversation_summary(
+            conversation_id="conv-summary",
+            summary_text="Initial summary",
+            last_summarized_message_id=persisted_exchange.assistant_message_id,
+        )
+        updated_summary = await memory_repository.upsert_conversation_summary(
+            conversation_id="conv-summary",
+            summary_text="Updated summary",
+            last_summarized_message_id=persisted_exchange.assistant_message_id,
+        )
+        fetched_summary = await memory_repository.get_conversation_summary("conv-summary")
+        summary_row = session.get(ConversationSummary, "conv-summary")
+    finally:
+        session.close()
+
+    assert created_summary.conversation_id == "conv-summary"
+    assert updated_summary.summary_text == "Updated summary"
+    assert fetched_summary is not None
+    assert fetched_summary.summary_text == "Updated summary"
+    assert summary_row is not None
+    assert summary_row.last_summarized_message_id == persisted_exchange.assistant_message_id
+
+
+@pytest.mark.anyio
+async def test_memory_repository_lists_active_memories_and_soft_deletes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add(
+            User(
+                id="user-123",
+                display_name="Alice",
+                email=None,
+                plan=None,
+                locale=None,
+                preferences_json={},
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+        session.commit()
+        chat_repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        memory_repository = SqlAlchemyMemoryRepository(SyncAsyncSessionAdapter(session))
+        persisted_exchange = await chat_repository.append_exchange(
+            conversation_id="conv-memory",
+            user_message="I work at Example",
+            user_metadata={"user_profile": {"user_id": "user-123"}},
+            assistant_message="Noted",
+        )
+        created_memory = await memory_repository.upsert_memory(
+            user_id="user-123",
+            kind="profile",
+            key="profile.company",
+            value_json={"value": "Example"},
+            confidence=0.7,
+            source_message_id=persisted_exchange.user_message_id,
+            extraction_method="llm",
+        )
+        updated_memory = await memory_repository.upsert_memory(
+            user_id="user-123",
+            kind="profile",
+            key="profile.company",
+            value_json={"value": "Example Inc"},
+            confidence=0.9,
+            source_message_id=persisted_exchange.user_message_id,
+            extraction_method="llm",
+        )
+        listed_before_delete = await memory_repository.list_active_memories("user-123", limit=8)
+        deleted = await memory_repository.delete_memory(
+            user_id="user-123",
+            memory_id=created_memory.id,
+        )
+        listed_after_delete = await memory_repository.list_active_memories("user-123", limit=8)
+        deleted_row = session.get(Memory, created_memory.id)
+    finally:
+        session.close()
+
+    assert created_memory.id == updated_memory.id
+    assert listed_before_delete[0].value_json == {"value": "Example Inc"}
+    assert deleted is True
+    assert listed_after_delete == []
+    assert deleted_row is not None
+    assert deleted_row.deleted_at is not None
+
+
+@pytest.mark.anyio
+async def test_memory_repository_scopes_reads_by_owner_user_id(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add_all(
+            [
+                User(
+                    id="user-123",
+                    display_name="Alice",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                User(
+                    id="user-999",
+                    display_name="Mallory",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+            ]
+        )
+        session.commit()
+        chat_repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        memory_repository = SqlAlchemyMemoryRepository(SyncAsyncSessionAdapter(session))
+        persisted_exchange = await chat_repository.append_exchange(
+            conversation_id="conv-owned-memory",
+            user_message="I work at Example",
+            user_metadata={"user_profile": {"user_id": "user-123"}},
+            assistant_message="Noted",
+            owner_user_id="user-123",
+        )
+        await memory_repository.upsert_conversation_summary(
+            conversation_id="conv-owned-memory",
+            summary_text="Summary",
+            last_summarized_message_id=persisted_exchange.assistant_message_id,
+            owner_user_id="user-123",
+        )
+        await memory_repository.upsert_memory(
+            user_id="user-123",
+            kind="profile",
+            key="profile.company",
+            value_json={"value": "Example"},
+            confidence=0.7,
+            source_message_id=persisted_exchange.user_message_id,
+            extraction_method="llm",
+            owner_user_id="user-123",
+        )
+
+        owned_summary = await memory_repository.get_conversation_summary(
+            "conv-owned-memory",
+            owner_user_id="user-123",
+        )
+        foreign_summary = await memory_repository.get_conversation_summary(
+            "conv-owned-memory",
+            owner_user_id="user-999",
+        )
+        owned_memories = await memory_repository.list_active_memories(
+            "user-123",
+            limit=8,
+            owner_user_id="user-123",
+        )
+        foreign_memories = await memory_repository.list_active_memories(
+            "user-123",
+            limit=8,
+            owner_user_id="user-999",
+        )
+        foreign_delete = await memory_repository.delete_memory(
+            user_id="user-123",
+            memory_id=1,
+            owner_user_id="user-999",
+        )
+    finally:
+        session.close()
+
+    assert owned_summary is not None
+    assert foreign_summary is None
+    assert len(owned_memories) == 1
+    assert foreign_memories == []
+    assert foreign_delete is False
+
+
+@pytest.mark.anyio
+async def test_memory_repository_rejects_writes_to_foreign_owned_conversation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add_all(
+            [
+                User(
+                    id="user-123",
+                    display_name="Alice",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                User(
+                    id="user-999",
+                    display_name="Mallory",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+            ]
+        )
+        session.commit()
+        chat_repository = SqlAlchemyChatRepository(SyncAsyncSessionAdapter(session))
+        memory_repository = SqlAlchemyMemoryRepository(SyncAsyncSessionAdapter(session))
+        persisted_exchange = await chat_repository.append_exchange(
+            conversation_id="conv-owned-memory-write",
+            user_message="Hello",
+            user_metadata=None,
+            assistant_message="Hi",
+            owner_user_id="user-123",
+        )
+        with pytest.raises(OwnershipError):
+            await memory_repository.upsert_conversation_summary(
+                conversation_id="conv-owned-memory-write",
+                summary_text="Intrusion",
+                last_summarized_message_id=persisted_exchange.assistant_message_id,
+                owner_user_id="user-999",
+            )
+        with pytest.raises(OwnershipError):
+            await memory_repository.upsert_memory(
+                user_id="user-999",
+                kind="profile",
+                key="profile.company",
+                value_json={"value": "Intrusion"},
+                confidence=0.7,
+                source_message_id=persisted_exchange.user_message_id,
+                extraction_method="llm",
+                owner_user_id="user-123",
+            )
+    finally:
+        session.close()
 
 
 @pytest.mark.anyio
@@ -368,6 +759,85 @@ async def test_document_repository_searches_ready_chunks_by_similarity(
 
 
 @pytest.mark.anyio
+async def test_document_repository_filters_document_reads_and_search_by_owner(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add_all(
+            [
+                User(
+                    id="user-123",
+                    display_name="Alice",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                User(
+                    id="user-999",
+                    display_name="Mallory",
+                    email=None,
+                    plan=None,
+                    locale=None,
+                    preferences_json={},
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+            ]
+        )
+        session.commit()
+        repository = SqlAlchemyDocumentRepository(SyncAsyncSessionAdapter(session))
+        await repository.create_document(
+            document_id="doc-owned",
+            filename="owned.md",
+            content_type="text/markdown",
+            byte_size=100,
+            checksum_sha256="hash-owned",
+            status="ready",
+            failure_reason=None,
+            chunks=[
+                DocumentChunkCreate(
+                    chunk_index=0,
+                    content="owned chunk",
+                    embedding=[1.0, 0.0],
+                    start_offset=0,
+                    end_offset=11,
+                )
+            ],
+            owner_user_id="user-123",
+        )
+        visible_document = await repository.get_document(
+            "doc-owned",
+            owner_user_id="user-123",
+        )
+        hidden_document = await repository.get_document(
+            "doc-owned",
+            owner_user_id="user-999",
+        )
+        visible_results = await repository.search_similar_chunks(
+            query_embedding=[1.0, 0.0],
+            limit=5,
+            owner_user_id="user-123",
+        )
+        hidden_results = await repository.search_similar_chunks(
+            query_embedding=[1.0, 0.0],
+            limit=5,
+            owner_user_id="user-999",
+        )
+    finally:
+        session.close()
+
+    assert visible_document is not None
+    assert hidden_document is None
+    assert [result.document_id for result in visible_results] == ["doc-owned"]
+    assert hidden_results == []
+
+
+@pytest.mark.anyio
 async def test_document_repository_updates_status_and_lists_missing_embeddings(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -467,3 +937,35 @@ async def test_document_repository_lists_and_updates_missing_embeddings(
     assert missing[0].content == "missing embedding"
     assert updated == 1
     assert chunks[0].embedding == [0.5, 0.5]
+
+
+@pytest.mark.anyio
+async def test_auth_repository_creates_and_authenticates_api_keys(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        repository = SqlAlchemyAuthRepository(SyncAsyncSessionAdapter(session))
+        user = await repository.upsert_user(
+            user_id="user-123",
+            display_name="Alice",
+            email="alice@example.com",
+            plan="pro",
+            locale="en-US",
+            preferences_json={"timezone": "UTC"},
+        )
+        created = await repository.create_api_key(user_id=user.id, name="dev")
+        authenticated = await repository.authenticate_api_key(created.api_key)
+        api_key_row = session.execute(select(ApiKey)).scalar_one()
+        user_row = session.get(User, "user-123")
+    finally:
+        session.close()
+
+    assert authenticated is not None
+    assert authenticated.user_id == "user-123"
+    assert authenticated.display_name == "Alice"
+    assert authenticated.preferences == {"timezone": "UTC"}
+    assert api_key_row.key_prefix == created.key_prefix
+    assert api_key_row.last_used_at is not None
+    assert user_row is not None
+    assert user_row.email == "alice@example.com"

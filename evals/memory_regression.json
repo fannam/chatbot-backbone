@@ -1,0 +1,338 @@
+{
+  "cases": [
+    {
+      "id": "inject-summary-and-active-memory-into-chat-prompt",
+      "message": "What should I do next?",
+      "request_metadata": {
+        "user_profile": {
+          "user_id": "memory-user-1"
+        }
+      },
+      "history": [
+        {
+          "role": "user",
+          "content": "Old question"
+        },
+        {
+          "role": "assistant",
+          "content": "Old answer"
+        },
+        {
+          "role": "user",
+          "content": "Recent question"
+        }
+      ],
+      "seeded_summary": {
+        "summary_text": "User prefers concise Vietnamese answers.",
+        "last_summarized_message_id": 2
+      },
+      "seeded_memories": [
+        {
+          "kind": "preference",
+          "key": "preferences.language",
+          "value_json": {
+            "value": "Vietnamese"
+          },
+          "confidence": 0.92,
+          "extraction_method": "rule"
+        }
+      ],
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-1",
+          "content": "You should continue from the recent question and keep the answer concise.",
+          "expected_prompt_substrings": [
+            "Conversation summary:",
+            "User prefers concise Vietnamese answers.",
+            "Stored user memory:",
+            "Preferred language: Vietnamese",
+            "user: Recent question",
+            "user: What should I do next?"
+          ],
+          "forbidden_prompt_substrings": [
+            "user: Old question",
+            "assistant: Old answer"
+          ]
+        },
+        {
+          "kind": "memory_extraction",
+          "response_id": "memory-resp-2",
+          "content": "{\"memories\":[]}",
+          "expected_prompt_substrings": [
+            "Allowed keys: profile.role, profile.company, profile.team."
+          ]
+        }
+      ],
+      "expected_answer_substrings": [
+        "recent question",
+        "concise"
+      ],
+      "expect_summary_present": true,
+      "expected_summary": {
+        "exact_text": "User prefers concise Vietnamese answers.",
+        "last_summarized_message_id": 2
+      },
+      "expected_active_memory_count": 1,
+      "expected_active_memories": [
+        {
+          "key": "preferences.language",
+          "kind": "preference",
+          "extraction_method": "rule",
+          "value_subset": {
+            "value": "Vietnamese"
+          }
+        }
+      ]
+    },
+    {
+      "id": "refreshes-rolling-summary-when-history-exceeds-window",
+      "message": "Please summarize where we landed.",
+      "settings_overrides": {
+        "memory_summary_trigger_messages": 4,
+        "memory_recent_message_window": 2
+      },
+      "history": [
+        {
+          "role": "user",
+          "content": "We need a deployment plan."
+        },
+        {
+          "role": "assistant",
+          "content": "I will gather the deployment requirements."
+        },
+        {
+          "role": "user",
+          "content": "The rollout must stay low risk."
+        },
+        {
+          "role": "assistant",
+          "content": "Understood. I will stage it gradually."
+        },
+        {
+          "role": "user",
+          "content": "Please also document the rollback."
+        },
+        {
+          "role": "assistant",
+          "content": "I will add rollback steps."
+        }
+      ],
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-3",
+          "content": "We landed on a low-risk rollout with rollback steps.",
+          "expected_prompt_substrings": [
+            "user: We need a deployment plan.",
+            "assistant: I will add rollback steps.",
+            "user: Please summarize where we landed."
+          ]
+        },
+        {
+          "kind": "summary",
+          "response_id": "memory-resp-4",
+          "content": "The conversation is about a low-risk deployment plan that also needs rollback documentation.",
+          "expected_prompt_substrings": [
+            "Update the conversation summary.",
+            "No previous summary.",
+            "user: We need a deployment plan.",
+            "assistant: I will add rollback steps."
+          ],
+          "forbidden_prompt_substrings": [
+            "user: Please summarize where we landed."
+          ]
+        }
+      ],
+      "expected_answer_substrings": [
+        "low-risk rollout",
+        "rollback"
+      ],
+      "expect_summary_present": true,
+      "expected_summary": {
+        "exact_text": "The conversation is about a low-risk deployment plan that also needs rollback documentation.",
+        "last_summarized_message_id": 6
+      },
+      "expected_active_memory_count": 0
+    },
+    {
+      "id": "rule-based-extraction-persists-stable-preferences",
+      "message": "Call me Alice. Respond in Vietnamese. My timezone is Asia/Ho_Chi_Minh. Be concise.",
+      "request_metadata": {
+        "user_profile": {
+          "user_id": "memory-user-2"
+        }
+      },
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-5",
+          "content": "I will call you Alice and respond concisely.",
+          "expected_prompt_substrings": [
+            "user: Call me Alice. Respond in Vietnamese. My timezone is Asia/Ho_Chi_Minh. Be concise."
+          ]
+        },
+        {
+          "kind": "memory_extraction",
+          "response_id": "memory-resp-6",
+          "content": "{\"memories\":[]}",
+          "expected_prompt_substrings": [
+            "Allowed keys: profile.role, profile.company, profile.team."
+          ]
+        }
+      ],
+      "expected_answer_substrings": [
+        "Alice",
+        "concisely"
+      ],
+      "expect_summary_present": false,
+      "expected_active_memory_count": 4,
+      "expected_active_memories": [
+        {
+          "key": "profile.preferred_name",
+          "kind": "profile",
+          "extraction_method": "rule",
+          "value_subset": {
+            "value": "Alice"
+          }
+        },
+        {
+          "key": "preferences.language",
+          "kind": "preference",
+          "extraction_method": "rule",
+          "value_subset": {
+            "value": "Vietnamese"
+          }
+        },
+        {
+          "key": "preferences.timezone",
+          "kind": "preference",
+          "extraction_method": "rule",
+          "value_subset": {
+            "value": "Asia/Ho_Chi_Minh"
+          }
+        },
+        {
+          "key": "preferences.response_style",
+          "kind": "preference",
+          "extraction_method": "rule",
+          "value_subset": {
+            "value": "concise"
+          }
+        }
+      ]
+    },
+    {
+      "id": "llm-extraction-persists-only-allowlisted-profile-facts",
+      "message": "I work at Example Inc on the platform team as a staff engineer.",
+      "request_metadata": {
+        "user_profile": {
+          "user_id": "memory-user-3"
+        }
+      },
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-7",
+          "content": "I will keep that profile context in mind.",
+          "expected_prompt_substrings": [
+            "user: I work at Example Inc on the platform team as a staff engineer."
+          ]
+        },
+        {
+          "kind": "memory_extraction",
+          "response_id": "memory-resp-8",
+          "content": "{\"memories\":[{\"kind\":\"profile\",\"key\":\"profile.company\",\"value\":\"Example Inc\",\"confidence\":0.9},{\"kind\":\"profile\",\"key\":\"profile.team\",\"value\":\"platform\",\"confidence\":0.86},{\"kind\":\"profile\",\"key\":\"profile.role\",\"value\":\"staff engineer\",\"confidence\":0.82}]}",
+          "expected_prompt_substrings": [
+            "Allowed keys: profile.role, profile.company, profile.team.",
+            "Never include unsupported keys."
+          ]
+        }
+      ],
+      "expected_answer_substrings": [
+        "profile context"
+      ],
+      "expect_summary_present": false,
+      "expected_active_memory_count": 3,
+      "expected_active_memories": [
+        {
+          "key": "profile.company",
+          "kind": "profile",
+          "extraction_method": "llm",
+          "value_subset": {
+            "value": "Example Inc"
+          }
+        },
+        {
+          "key": "profile.team",
+          "kind": "profile",
+          "extraction_method": "llm",
+          "value_subset": {
+            "value": "platform"
+          }
+        },
+        {
+          "key": "profile.role",
+          "kind": "profile",
+          "extraction_method": "llm",
+          "value_subset": {
+            "value": "staff engineer"
+          }
+        }
+      ]
+    },
+    {
+      "id": "invalid-llm-memory-payload-does-not-persist-memory",
+      "message": "I work at Example Inc.",
+      "request_metadata": {
+        "user_profile": {
+          "user_id": "memory-user-4"
+        }
+      },
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-9",
+          "content": "Understood.",
+          "expected_prompt_substrings": [
+            "user: I work at Example Inc."
+          ]
+        },
+        {
+          "kind": "memory_extraction",
+          "response_id": "memory-resp-10",
+          "content": "not-json"
+        }
+      ],
+      "expected_answer_substrings": [
+        "Understood"
+      ],
+      "expect_summary_present": false,
+      "expected_active_memory_count": 0
+    },
+    {
+      "id": "missing-user-id-skips-long-term-memory-write",
+      "message": "Call me Alice.",
+      "request_metadata": {
+        "user_profile": {
+          "display_name": "Anonymous"
+        }
+      },
+      "script": [
+        {
+          "kind": "chat",
+          "response_id": "memory-resp-11",
+          "content": "I can call you Alice in this conversation.",
+          "expected_prompt_substrings": [
+            "user: Call me Alice."
+          ]
+        }
+      ],
+      "expected_answer_substrings": [
+        "Alice"
+      ],
+      "expect_summary_present": false,
+      "expected_active_memory_count": 0
+    }
+  ]
+}

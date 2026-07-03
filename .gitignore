@@ -6,5 +6,5 @@ __pycache__/
 *.pyc
 dist/
 build/
-status.md
-roadmap.md
+# status.md
+# roadmap.md

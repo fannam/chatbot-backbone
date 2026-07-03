@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
     ChatCitation,
@@ -70,6 +71,7 @@ class ChatService:
         repository: ChatRepository,
         workflow: ChatWorkflow | None = None,
         tool_registry: ToolRegistry | None = None,
+        memory_manager: MemoryManager | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -81,6 +83,7 @@ class ChatService:
         self._repository = repository
         self._workflow = workflow or build_chat_workflow()
         self._tool_registry = tool_registry
+        self._memory_manager = memory_manager
         self._tool_max_rounds = tool_max_rounds
         self._observability = observability
         self._pricing_model = pricing_model
@@ -94,15 +97,18 @@ class ChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> tuple[str, ChatCompletion]:
         resolved_conversation_id = conversation_id or str(uuid4())
         return await self._workflow.run(
             conversation_id=resolved_conversation_id,
+            owner_user_id=owner_user_id,
             message=message,
             metadata=metadata,
             provider=self._provider,
             repository=self._repository,
             tool_registry=self._tool_registry,
+            memory_manager=self._memory_manager,
             tool_max_rounds=self._tool_max_rounds,
             observability=self._observability,
             pricing_model=self._pricing_model,
@@ -117,6 +123,7 @@ class ChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> AsyncIterator[
         ChatStreamStart
         | ChatStreamToolStart
@@ -128,11 +135,13 @@ class ChatService:
         resolved_conversation_id = conversation_id or str(uuid4())
         async for event in self._workflow.stream(
             conversation_id=resolved_conversation_id,
+            owner_user_id=owner_user_id,
             message=message,
             metadata=metadata,
             provider=self._provider,
             repository=self._repository,
             tool_registry=self._tool_registry,
+            memory_manager=self._memory_manager,
             tool_max_rounds=self._tool_max_rounds,
             observability=self._observability,
             pricing_model=self._pricing_model,

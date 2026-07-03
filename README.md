@@ -125,8 +125,8 @@ includes both citation metadata and executed `tool_runs` without altering
 allowlisted, validated with schemas, and time-bounded.
 
 The request `metadata` object is also the source for request-scoped tool context.
-The reserved key `metadata.user_profile` can be used by the allowlisted
-`get_current_user_profile` tool. The current Phase 4 contract is:
+The reserved key `metadata.user_profile` is used by the allowlisted
+`get_current_user_profile` tool. The current payload shape is:
 
 ```json
 {
@@ -146,11 +146,40 @@ The reserved key `metadata.user_profile` can be used by the allowlisted
 If `user_profile` is missing or malformed, the tool still completes normally and
 returns `{"found": false, "profile": null}` instead of failing the tool call.
 
+## API key auth
+
+Phase 6 adds an optional API key auth layer for stateful endpoints. When
+`AUTH_ENABLED=true`, `/chat`, `/documents`, `/documents/{id}`,
+`/conversations/{conversation_id}/tool-runs`,
+`/conversations/{conversation_id}/memory`, and `/users/{user_id}/memories`
+require `X-API-Key`.
+
+Provision a user plus one API key:
+
+```bash
+uv run python -m chatbot_api.create_api_key \
+  --user-id user-123 \
+  --name dev \
+  --display-name "Alice" \
+  --email alice@example.com \
+  --plan pro \
+  --locale en-US \
+  --preferences-json '{"timezone":"UTC"}'
+```
+
+The command prints the plaintext API key once. The database stores only its hash
+plus a short prefix for debugging.
+
+When auth is enabled, the server overwrites `metadata.user_profile` with the
+authenticated user profile before the workflow, tools, and memory layer read it.
+Client-supplied `user_profile.user_id` is therefore not trusted.
+
 Example chat request with request-scoped profile data:
 
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{
     "message": "What plan am I on?",
     "metadata": {
@@ -168,6 +197,7 @@ Example document upload:
 
 ```bash
 curl -X POST http://localhost:8000/documents \
+  -H "X-API-Key: <your-api-key>" \
   -F "file=@/path/to/notes.md"
 ```
 
@@ -245,7 +275,28 @@ Expected response shape:
 
 `GET /conversations/{conversation_id}/tool-runs` is a read-only debug endpoint.
 It returns the newest tool runs first, supports `limit` from `1` to `100`, and
-returns `404` when the conversation does not exist.
+returns `404` when the conversation does not exist or belongs to a different
+authenticated user.
+
+## Memory debug endpoints
+
+Phase 5 keeps `/chat` unchanged and exposes memory through separate debug
+endpoints:
+
+```bash
+curl -H "X-API-Key: <your-api-key>" \
+  http://localhost:8000/conversations/generated-or-supplied-id/memory
+curl -H "X-API-Key: <your-api-key>" \
+  http://localhost:8000/users/user-123/memories
+curl -X DELETE -H "X-API-Key: <your-api-key>" \
+  http://localhost:8000/users/user-123/memories/1
+```
+
+`GET /conversations/{conversation_id}/memory` returns the current rolling
+conversation summary snapshot when it exists. `GET /users/{user_id}/memories`
+returns active long-term user memories, and
+`DELETE /users/{user_id}/memories/{memory_id}` soft-deletes one memory item.
+When auth is enabled, those endpoints are scoped to the authenticated user.
 
 ## Observability
 
@@ -425,15 +476,50 @@ summary prints pass rate plus tool/source/answer match rates, and the JSON
 report includes per-case failures, tool runs, citations, and aggregated
 usage/cost metadata.
 
+## Memory regression eval
+
+The repo also includes a deterministic memory-focused regression eval for the
+real `ChatService` + `MemoryManager` path:
+
+```bash
+uv run python -m chatbot_api.memory_eval \
+  --dataset evals/memory_regression.json \
+  --output .artifacts/memory-eval-report.json
+```
+
+This eval keeps the real workflow, persistence, short-term summary refresh, and
+long-term memory extraction/injection logic, but replaces the model with a
+scripted provider. That makes it stable enough to regression-test prompt
+injection, summary writes, allowlisted long-term extraction, and failure paths
+without calling a live model.
+
+The checked-in dataset covers:
+
+- injecting seeded conversation summaries and active memories into the chat prompt
+- refreshing the rolling conversation summary when unsummarized history exceeds
+  the configured window
+- rule-based extraction for durable preferences such as preferred name,
+  language, timezone, and response style
+- LLM-based extraction for the allowlisted profile keys
+  `profile.role/profile.company/profile.team`
+- invalid extraction payloads that must not persist memory
+- requests without `metadata.user_profile.user_id`, which must skip long-term
+  writes
+
+The summary prints pass rate plus prompt/summary/memory/answer match rates, and
+the JSON report includes per-case provider prompts, stored summary state, and
+active memories after the run.
+
 ## Combined eval suite
 
-For a single local/dev quality gate that checks corpus readiness and runs both
-offline evals together:
+For a single local/dev quality gate that checks corpus readiness and runs the
+retrieval, chat/tool, and memory evals together:
 
 ```bash
 uv run python -m chatbot_api.eval_suite \
   --rag-dataset evals/rag_retrieval_baseline.json \
   --chat-dataset evals/chat_tool_regression.json \
+  --memory-dataset evals/memory_regression.json \
   --output-dir .artifacts
 ```
 
@@ -446,6 +532,7 @@ When preflight passes, the suite writes:
 
 - `.artifacts/rag-eval-report.json`
 - `.artifacts/chat-eval-report.json`
+- `.artifacts/memory-eval-report.json`
 - `.artifacts/eval-suite-report.json`
 
 Default quality gates are strict for local/dev regression use:
@@ -453,9 +540,11 @@ Default quality gates are strict for local/dev regression use:
 - retrieval `document_hit_rate >= 1.0`
 - retrieval `chunk_hit_rate >= 1.0` when chunk expectations exist
 - chat/tool `pass_rate >= 1.0`
+- memory `pass_rate >= 1.0`
 
 You can relax them with `--min-rag-document-hit-rate`,
-`--min-rag-chunk-hit-rate`, and `--min-chat-pass-rate`.
+`--min-rag-chunk-hit-rate`, `--min-chat-pass-rate`, and
+`--min-memory-pass-rate`.
 
 ## Environment variables
 
@@ -474,6 +563,16 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `RETRIEVAL_MIN_SCORE`: minimum similarity score required before a chunk is used
 - `RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT`: per-document cap applied after ranking
 - `RETRIEVAL_CANDIDATE_LIMIT`: number of ranked candidates fetched before filtering and dedupe
+- `TOOL_MAX_ROUNDS`: maximum provider rounds allowed for tool execution
+- `TOOL_EXECUTION_TIMEOUT_SECONDS`: timeout applied to one tool execution
+- `TOOL_SEARCH_TOP_K`: default top-k used by the knowledge-base search tool
+- `AUTH_ENABLED`: require `X-API-Key` for stateful API endpoints
+- `MEMORY_ENABLED`: enables short-term and long-term memory nodes in the workflow
+- `MEMORY_RECENT_MESSAGE_WINDOW`: number of newest raw messages kept outside the rolling summary
+- `MEMORY_SUMMARY_TRIGGER_MESSAGES`: unsummarized message count required before refreshing the rolling summary
+- `MEMORY_MAX_SUMMARY_CHARS`: maximum summary size produced by the summary updater
+- `MEMORY_MAX_ACTIVE_ITEMS`: maximum active long-term memories injected into the prompt
+- `MEMORY_LONG_TERM_ENABLED`: enables long-term memory extraction and injection
 - `DATABASE_URL`: SQLAlchemy connection string used for chat persistence
 - `LANGGRAPH_CHECKPOINT_DATABASE_URL`: optional Postgres DSN for LangGraph
   checkpoints; defaults to a driverless form derived from `DATABASE_URL`

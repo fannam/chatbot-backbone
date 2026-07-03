@@ -117,6 +117,46 @@ def build_chat_dataset(*, answer_text: str, expected_answer_substring: str) -> d
     }
 
 
+def build_memory_dataset(
+    *,
+    answer_text: str,
+    expected_answer_substring: str,
+) -> dict[str, object]:
+    return {
+        "cases": [
+            {
+                "id": "memory-rule-case",
+                "message": "Call me Alice.",
+                "request_metadata": {"user_profile": {"user_id": "user-memory-1"}},
+                "script": [
+                    {
+                        "kind": "chat",
+                        "response_id": "memory-resp-1",
+                        "content": answer_text,
+                        "expected_prompt_substrings": ["user: Call me Alice."],
+                    },
+                    {
+                        "kind": "memory_extraction",
+                        "response_id": "memory-resp-2",
+                        "content": "{\"memories\":[]}",
+                    },
+                ],
+                "expected_answer_substrings": [expected_answer_substring],
+                "expect_summary_present": False,
+                "expected_active_memory_count": 1,
+                "expected_active_memories": [
+                    {
+                        "key": "profile.preferred_name",
+                        "kind": "profile",
+                        "extraction_method": "rule",
+                        "value_subset": {"value": "Alice"},
+                    }
+                ],
+            }
+        ]
+    }
+
+
 @pytest.mark.anyio
 async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
     tmp_path: Path,
@@ -125,6 +165,7 @@ async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
     database_url = f"sqlite+aiosqlite:///{database_path}"
     rag_dataset_path = tmp_path / "rag.json"
     chat_dataset_path = tmp_path / "chat.json"
+    memory_dataset_path = tmp_path / "memory.json"
 
     write_dataset(rag_dataset_path, build_rag_dataset())
     write_dataset(
@@ -132,6 +173,13 @@ async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
         build_chat_dataset(
             answer_text="The guide says hello.",
             expected_answer_substring="hello",
+        ),
+    )
+    write_dataset(
+        memory_dataset_path,
+        build_memory_dataset(
+            answer_text="I will call you Alice.",
+            expected_answer_substring="Alice",
         ),
     )
 
@@ -143,6 +191,7 @@ async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
         report = await run_eval_suite(
             rag_dataset_path=rag_dataset_path,
             chat_dataset_path=chat_dataset_path,
+            memory_dataset_path=memory_dataset_path,
             output_dir=tmp_path / "artifacts-missing",
             settings=Settings(
                 database_url=database_url,
@@ -158,6 +207,7 @@ async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
     assert report.corpus_preflight.missing_filenames == ["guide.md"]
     assert report.rag_summary is None
     assert report.chat_summary is None
+    assert report.memory_summary is None
     assert exit_code_for_report(report) == 1
     payload = json.loads(
         (tmp_path / "artifacts-missing" / "eval-suite-report.json").read_text(encoding="utf-8")
@@ -165,6 +215,7 @@ async def test_run_eval_suite_fails_preflight_when_required_document_is_missing(
     assert payload["passed"] is False
     assert payload["rag_summary"] is None
     assert payload["chat_summary"] is None
+    assert payload["memory_summary"] is None
 
 
 @pytest.mark.anyio
@@ -173,6 +224,7 @@ async def test_run_eval_suite_writes_all_reports_on_success(tmp_path: Path) -> N
     database_url = f"sqlite+aiosqlite:///{database_path}"
     rag_dataset_path = tmp_path / "rag.json"
     chat_dataset_path = tmp_path / "chat.json"
+    memory_dataset_path = tmp_path / "memory.json"
     output_dir = tmp_path / "artifacts-success"
 
     write_dataset(rag_dataset_path, build_rag_dataset())
@@ -181,6 +233,13 @@ async def test_run_eval_suite_writes_all_reports_on_success(tmp_path: Path) -> N
         build_chat_dataset(
             answer_text="The guide says hello.",
             expected_answer_substring="hello",
+        ),
+    )
+    write_dataset(
+        memory_dataset_path,
+        build_memory_dataset(
+            answer_text="I will call you Alice.",
+            expected_answer_substring="Alice",
         ),
     )
 
@@ -200,6 +259,7 @@ async def test_run_eval_suite_writes_all_reports_on_success(tmp_path: Path) -> N
         report = await run_eval_suite(
             rag_dataset_path=rag_dataset_path,
             chat_dataset_path=chat_dataset_path,
+            memory_dataset_path=memory_dataset_path,
             output_dir=output_dir,
             settings=Settings(
                 database_url=database_url,
@@ -221,10 +281,13 @@ async def test_run_eval_suite_writes_all_reports_on_success(tmp_path: Path) -> N
     assert report.rag_summary.document_hit_rate == 1.0
     assert report.chat_summary is not None
     assert report.chat_summary.pass_rate == 1.0
+    assert report.memory_summary is not None
+    assert report.memory_summary.pass_rate == 1.0
     assert exit_code_for_report(report) == 0
     assert embedding_provider.calls == [["guide question"], ["guide question"]]
     assert (output_dir / "rag-eval-report.json").exists()
     assert (output_dir / "chat-eval-report.json").exists()
+    assert (output_dir / "memory-eval-report.json").exists()
     assert (output_dir / "eval-suite-report.json").exists()
 
 
@@ -234,6 +297,7 @@ async def test_run_eval_suite_fails_quality_gate_when_chat_eval_fails(tmp_path: 
     database_url = f"sqlite+aiosqlite:///{database_path}"
     rag_dataset_path = tmp_path / "rag.json"
     chat_dataset_path = tmp_path / "chat.json"
+    memory_dataset_path = tmp_path / "memory.json"
 
     write_dataset(rag_dataset_path, build_rag_dataset())
     write_dataset(
@@ -241,6 +305,13 @@ async def test_run_eval_suite_fails_quality_gate_when_chat_eval_fails(tmp_path: 
         build_chat_dataset(
             answer_text="The guide says hello.",
             expected_answer_substring="goodbye",
+        ),
+    )
+    write_dataset(
+        memory_dataset_path,
+        build_memory_dataset(
+            answer_text="I will call you Alice.",
+            expected_answer_substring="Alice",
         ),
     )
 
@@ -259,6 +330,7 @@ async def test_run_eval_suite_fails_quality_gate_when_chat_eval_fails(tmp_path: 
         report = await run_eval_suite(
             rag_dataset_path=rag_dataset_path,
             chat_dataset_path=chat_dataset_path,
+            memory_dataset_path=memory_dataset_path,
             output_dir=tmp_path / "artifacts-chat-fail",
             settings=Settings(
                 database_url=database_url,
@@ -277,5 +349,71 @@ async def test_run_eval_suite_fails_quality_gate_when_chat_eval_fails(tmp_path: 
     assert report.passed is False
     assert report.chat_summary is not None
     assert report.chat_summary.pass_rate == 0.0
+    assert report.memory_summary is not None
+    assert report.memory_summary.pass_rate == 1.0
     assert any("chat pass_rate below threshold" in item for item in report.failure_reasons)
+    assert exit_code_for_report(report) == 1
+
+
+@pytest.mark.anyio
+async def test_run_eval_suite_fails_quality_gate_when_memory_eval_fails(tmp_path: Path) -> None:
+    database_path = tmp_path / "memory-fail.db"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+    rag_dataset_path = tmp_path / "rag.json"
+    chat_dataset_path = tmp_path / "chat.json"
+    memory_dataset_path = tmp_path / "memory.json"
+
+    write_dataset(rag_dataset_path, build_rag_dataset())
+    write_dataset(
+        chat_dataset_path,
+        build_chat_dataset(
+            answer_text="The guide says hello.",
+            expected_answer_substring="hello",
+        ),
+    )
+    write_dataset(
+        memory_dataset_path,
+        build_memory_dataset(
+            answer_text="I will call you Alice.",
+            expected_answer_substring="Bob",
+        ),
+    )
+
+    engine = create_database_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        await seed_document(
+            database_url=database_url,
+            document_id="doc-guide",
+            filename="guide.md",
+            status="ready",
+            embedding=[1.0, 0.0],
+        )
+
+        report = await run_eval_suite(
+            rag_dataset_path=rag_dataset_path,
+            chat_dataset_path=chat_dataset_path,
+            memory_dataset_path=memory_dataset_path,
+            output_dir=tmp_path / "artifacts-memory-fail",
+            settings=Settings(
+                database_url=database_url,
+                langgraph_checkpoint_database_url=None,
+                retrieval_top_k=1,
+                retrieval_min_score=0.3,
+                retrieval_max_chunks_per_document=1,
+                retrieval_candidate_limit=2,
+                tool_search_top_k=1,
+            ),
+            embedding_provider=StubEmbeddingProvider({"guide question": [1.0, 0.0]}),
+        )
+    finally:
+        await engine.dispose()
+
+    assert report.passed is False
+    assert report.chat_summary is not None
+    assert report.chat_summary.pass_rate == 1.0
+    assert report.memory_summary is not None
+    assert report.memory_summary.pass_rate == 0.0
+    assert any("memory pass_rate below threshold" in item for item in report.failure_reasons)
     assert exit_code_for_report(report) == 1

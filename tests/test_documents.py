@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from chatbot_api.auth import AuthenticatedUser
 from chatbot_api.document_ingestion import (
     DefaultDocumentTextExtractor,
     DocumentChunkCreate,
@@ -15,6 +16,7 @@ from chatbot_api.document_ingestion import (
 )
 from chatbot_api.main import (
     app,
+    get_authenticated_user,
     get_document_repository,
     get_document_service,
     get_document_task_queue,
@@ -42,6 +44,7 @@ class InMemoryDocumentRepository:
         status: str,
         failure_reason: str | None = None,
         chunks: list[DocumentChunkCreate],
+        owner_user_id: str | None = None,
     ) -> DocumentRecord:
         now = datetime.now(UTC)
         record = DocumentRecord(
@@ -54,18 +57,37 @@ class InMemoryDocumentRepository:
             failure_reason=failure_reason,
             created_at=now,
             updated_at=now,
+            owner_user_id=owner_user_id,
         )
         self.documents[document_id] = StoredDocument(record=record, chunks=list(chunks))
         return record
 
-    async def get_document(self, document_id: str) -> DocumentRecord | None:
+    async def get_document(
+        self,
+        document_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> DocumentRecord | None:
         stored = self.documents.get(document_id)
         if stored is None:
             return None
+        if owner_user_id is not None and stored.record.owner_user_id != owner_user_id:
+            return None
         return stored.record
 
-    async def count_document_chunks(self, document_id: str) -> int:
+    async def count_document_chunks(
+        self,
+        document_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> int:
         stored = self.documents.get(document_id)
+        if (
+            stored is None
+            or owner_user_id is not None
+            and stored.record.owner_user_id != owner_user_id
+        ):
+            return 0
         return len(stored.chunks) if stored is not None else 0
 
     async def mark_document_ready(self, document_id: str) -> DocumentRecord | None:
@@ -139,6 +161,13 @@ def build_document_repository_override(repository: InMemoryDocumentRepository):
 def build_document_task_queue_override(task_queue: StubDocumentTaskQueue):
     async def override() -> StubDocumentTaskQueue:
         return task_queue
+
+    return override
+
+
+def build_authenticated_user_override(user: AuthenticatedUser | None):
+    async def override() -> AuthenticatedUser | None:
+        return user
 
     return override
 
@@ -444,3 +473,95 @@ async def test_get_document_returns_current_status(
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
     assert response.json()["chunk_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_document_upload_persists_authenticated_owner_user_id(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    repository = InMemoryDocumentRepository()
+    task_queue = StubDocumentTaskQueue()
+    app.dependency_overrides[get_document_service] = build_document_service_override(
+        build_document_service(repository)
+    )
+    app.dependency_overrides[get_document_repository] = build_document_repository_override(
+        repository
+    )
+    app.dependency_overrides[get_document_task_queue] = build_document_task_queue_override(
+        task_queue
+    )
+    app.dependency_overrides[get_authenticated_user] = build_authenticated_user_override(
+        AuthenticatedUser(
+            user_id="user-123",
+            display_name="Alice",
+            email=None,
+            plan=None,
+            locale=None,
+            preferences={},
+        )
+    )
+
+    response = await async_client.post(
+        "/documents",
+        files={"file": ("notes.txt", b"Hello world", "text/plain")},
+    )
+
+    assert response.status_code == 201
+    document_id = response.json()["document_id"]
+    assert repository.documents[document_id].record.owner_user_id == "user-123"
+
+
+@pytest.mark.anyio
+async def test_get_document_returns_not_found_for_other_users_document(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    repository = InMemoryDocumentRepository()
+    task_queue = StubDocumentTaskQueue()
+    app.dependency_overrides[get_document_service] = build_document_service_override(
+        build_document_service(repository)
+    )
+    app.dependency_overrides[get_document_repository] = build_document_repository_override(
+        repository
+    )
+    app.dependency_overrides[get_document_task_queue] = build_document_task_queue_override(
+        task_queue
+    )
+    app.dependency_overrides[get_authenticated_user] = build_authenticated_user_override(
+        AuthenticatedUser(
+            user_id="user-self",
+            display_name=None,
+            email=None,
+            plan=None,
+            locale=None,
+            preferences={},
+        )
+    )
+    repository.documents["doc-foreign"] = StoredDocument(
+        record=DocumentRecord(
+            id="doc-foreign",
+            filename="foreign.txt",
+            content_type="text/plain",
+            byte_size=5,
+            checksum_sha256="hash-foreign",
+            status="ready",
+            failure_reason=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            owner_user_id="user-other",
+        ),
+        chunks=[
+            DocumentChunkCreate(
+                chunk_index=0,
+                content="hello",
+                start_offset=0,
+                end_offset=5,
+            )
+        ],
+    )
+
+    response = await async_client.get("/documents/doc-foreign")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "document not found"}

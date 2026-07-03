@@ -35,6 +35,13 @@ class Settings(BaseModel):
     tool_max_rounds: int = 4
     tool_execution_timeout_seconds: float = 15.0
     tool_search_top_k: int = 3
+    auth_enabled: bool = False
+    memory_enabled: bool = True
+    memory_recent_message_window: int = 6
+    memory_summary_trigger_messages: int = 12
+    memory_max_summary_chars: int = 2000
+    memory_max_active_items: int = 8
+    memory_long_term_enabled: bool = True
     observability_json_logs: bool = True
     observability_metrics_enabled: bool = True
     observability_include_request_metadata: bool = False
@@ -130,6 +137,15 @@ def get_settings() -> Settings:
             os.getenv("TOOL_EXECUTION_TIMEOUT_SECONDS", "15")
         ),
         tool_search_top_k=int(os.getenv("TOOL_SEARCH_TOP_K", "3")),
+        auth_enabled=parse_bool_env("AUTH_ENABLED", False),
+        memory_enabled=parse_bool_env("MEMORY_ENABLED", True),
+        memory_recent_message_window=int(os.getenv("MEMORY_RECENT_MESSAGE_WINDOW", "6")),
+        memory_summary_trigger_messages=int(
+            os.getenv("MEMORY_SUMMARY_TRIGGER_MESSAGES", "12")
+        ),
+        memory_max_summary_chars=int(os.getenv("MEMORY_MAX_SUMMARY_CHARS", "2000")),
+        memory_max_active_items=int(os.getenv("MEMORY_MAX_ACTIVE_ITEMS", "8")),
+        memory_long_term_enabled=parse_bool_env("MEMORY_LONG_TERM_ENABLED", True),
         observability_json_logs=os.getenv("OBSERVABILITY_JSON_LOGS", "true").lower()
         not in {"0", "false", "no"},
         observability_metrics_enabled=os.getenv(

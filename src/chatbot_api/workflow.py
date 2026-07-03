@@ -9,6 +9,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
+from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
     ChatCitation,
@@ -87,6 +88,7 @@ class ChatWorkflowToolOutput(TypedDict):
 
 class ChatWorkflowState(TypedDict):
     conversation_id: str
+    owner_user_id: str | None
     user_message: str
     user_metadata: dict[str, Any] | None
     stream: bool
@@ -101,6 +103,7 @@ class ChatWorkflowState(TypedDict):
     response_metadata: ChatWorkflowMetadata | None
     usage_totals: ChatWorkflowUsage | None
     cost_totals: ChatWorkflowCost | None
+    persisted_user_message_id: int | None
     message_started: bool
     tool_rounds: int
     model_rounds: int
@@ -110,6 +113,7 @@ class ChatWorkflowContext(TypedDict):
     provider: ChatProvider
     repository: ChatRepository
     tool_registry: ToolRegistry | None
+    memory_manager: MemoryManager | None
     tool_max_rounds: int
     observability: ObservabilityService | None
     trace_sink: TraceSink
@@ -195,7 +199,10 @@ async def load_context_node(
         tags=["workflow", "node:load_context"],
     )
     with span:
-        history = await runtime.context["repository"].list_messages(state["conversation_id"])
+        history = await runtime.context["repository"].list_messages(
+            state["conversation_id"],
+            owner_user_id=state["owner_user_id"],
+        )
         provider_messages = [*history, ChatTurn(role="user", content=state["user_message"])]
         updates = {
             "history": [serialize_turn(turn) for turn in history],
@@ -209,6 +216,7 @@ async def load_context_node(
             "response_metadata": None,
             "usage_totals": None,
             "cost_totals": None,
+            "persisted_user_message_id": None,
             "message_started": False,
             "tool_rounds": 0,
             "model_rounds": 0,
@@ -220,6 +228,51 @@ async def load_context_node(
             }
         )
         return updates
+
+
+async def load_memory_node(
+    state: ChatWorkflowState,
+    runtime: Runtime[ChatWorkflowContext],
+) -> dict[str, Any]:
+    span = runtime.context["trace_sink"].start_span(
+        "workflow.load_memory",
+        inputs={"conversation_id": state["conversation_id"]},
+        metadata={"node": "load_memory"},
+        tags=["workflow", "node:load_memory"],
+    )
+    with span:
+        memory_manager = runtime.context["memory_manager"]
+        if memory_manager is None:
+            span.finish_success(outputs={"memory_enabled": False})
+            return {}
+
+        try:
+            history_records = await runtime.context["repository"].list_message_records(
+                state["conversation_id"],
+                owner_user_id=state["owner_user_id"],
+            )
+            prompt_state = await memory_manager.prepare_prompt(
+                conversation_id=state["conversation_id"],
+                history_records=history_records,
+                user_message=state["user_message"],
+                user_metadata=state["user_metadata"],
+                owner_user_id=state["owner_user_id"],
+            )
+        except Exception as exc:
+            annotate_memory_skipped_on_error(span, exc)
+            return {}
+
+        span.finish_success(
+            outputs={
+                "memory_enabled": True,
+                "has_summary": prompt_state.summary is not None,
+                "memory_count": len(prompt_state.active_memories),
+                "provider_message_count": len(prompt_state.provider_messages),
+            }
+        )
+        return {
+            "provider_messages": [serialize_turn(turn) for turn in prompt_state.provider_messages]
+        }
 
 
 async def call_model_node(
@@ -454,11 +507,13 @@ async def execute_tools_node(
                 tool_call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 input_payload=tool_call.arguments,
+                owner_user_id=state["owner_user_id"],
             )
             result = await tool_registry.execute(
                 tool_call,
                 context=ToolExecutionContext(
                     conversation_id=state["conversation_id"],
+                    owner_user_id=state["owner_user_id"],
                     request_metadata=state["user_metadata"],
                 ),
             )
@@ -480,6 +535,7 @@ async def execute_tools_node(
                     conversation_id=state["conversation_id"],
                     tool_call_id=tool_call.call_id,
                     output_payload=result.tool_run.output or {},
+                    owner_user_id=state["owner_user_id"],
                 )
                 if writer is not None:
                     writer(
@@ -499,6 +555,7 @@ async def execute_tools_node(
                 tool_call_id=tool_call.call_id,
                 status=result.tool_run.status,
                 error_message=result.tool_run.error or "tool execution failed",
+                owner_user_id=state["owner_user_id"],
             )
             if writer is not None:
                 writer(
@@ -556,11 +613,12 @@ async def persist_response_node(
         if assistant_message is None or provider_name is None or model_name is None:
             raise ValueError("workflow completed without an assistant response")
 
-        await runtime.context["repository"].append_exchange(
+        persisted_exchange = await runtime.context["repository"].append_exchange(
             conversation_id=state["conversation_id"],
             user_message=state["user_message"],
             user_metadata=state["user_metadata"],
             assistant_message=assistant_message,
+            owner_user_id=state["owner_user_id"],
         )
 
         if state["stream"]:
@@ -586,7 +644,56 @@ async def persist_response_node(
                 "has_metadata": response_metadata is not None,
             }
         )
+        return {"persisted_user_message_id": persisted_exchange.user_message_id}
+
+
+async def write_memory_node(
+    state: ChatWorkflowState,
+    runtime: Runtime[ChatWorkflowContext],
+) -> dict[str, Any]:
+    span = runtime.context["trace_sink"].start_span(
+        "workflow.write_memory",
+        inputs={"conversation_id": state["conversation_id"]},
+        metadata={"node": "write_memory"},
+        tags=["workflow", "node:write_memory"],
+    )
+    with span:
+        memory_manager = runtime.context["memory_manager"]
+        user_message_id = state["persisted_user_message_id"]
+        if memory_manager is None or user_message_id is None:
+            span.finish_success(
+                outputs={
+                    "memory_enabled": memory_manager is not None,
+                    "wrote_memory": False,
+                }
+            )
+            return {}
+
+        try:
+            await memory_manager.write_after_persist(
+                conversation_id=state["conversation_id"],
+                user_message=state["user_message"],
+                user_metadata=state["user_metadata"],
+                user_message_id=user_message_id,
+                owner_user_id=state["owner_user_id"],
+            )
+        except Exception as exc:
+            annotate_memory_skipped_on_error(span, exc)
+            return {}
+
+        span.finish_success(outputs={"memory_enabled": True, "wrote_memory": True})
         return {}
+
+
+def annotate_memory_skipped_on_error(span: Any, exc: Exception) -> None:
+    span.annotate(
+        metadata={
+            "memory_enabled": True,
+            "outcome": "skipped_on_error",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+    )
 
 
 async def route_after_call_model(state: ChatWorkflowState) -> str:
@@ -605,9 +712,11 @@ class ChatWorkflow:
         conversation_id: str,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
         provider: ChatProvider,
         repository: ChatRepository,
         tool_registry: ToolRegistry | None = None,
+        memory_manager: MemoryManager | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -637,22 +746,24 @@ class ChatWorkflow:
                         await self._graph.ainvoke(
                             initial_workflow_state(
                                 conversation_id=conversation_id,
+                                owner_user_id=owner_user_id,
                                 message=message,
                                 metadata=metadata,
                                 stream=False,
                             ),
                             config=workflow_config(conversation_id),
-                            context={
-                                "provider": provider,
-                                "repository": repository,
-                                "tool_registry": tool_registry,
-                                "tool_max_rounds": tool_max_rounds,
-                                "observability": observability,
-                                "trace_sink": resolved_trace_sink,
-                                "pricing_model": pricing_model,
-                                "input_price_per_1m_tokens": input_price_per_1m_tokens,
-                                "output_price_per_1m_tokens": output_price_per_1m_tokens,
-                            },
+                            context=build_workflow_context(
+                                provider=provider,
+                                repository=repository,
+                                tool_registry=tool_registry,
+                                memory_manager=memory_manager,
+                                tool_max_rounds=tool_max_rounds,
+                                observability=observability,
+                                trace_sink=resolved_trace_sink,
+                                pricing_model=pricing_model,
+                                input_price_per_1m_tokens=input_price_per_1m_tokens,
+                                output_price_per_1m_tokens=output_price_per_1m_tokens,
+                            ),
                         ),
                     )
 
@@ -698,9 +809,11 @@ class ChatWorkflow:
         conversation_id: str,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
         provider: ChatProvider,
         repository: ChatRepository,
         tool_registry: ToolRegistry | None = None,
+        memory_manager: MemoryManager | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -728,22 +841,24 @@ class ChatWorkflow:
                     async for event in self._graph.astream(
                         initial_workflow_state(
                             conversation_id=conversation_id,
+                            owner_user_id=owner_user_id,
                             message=message,
                             metadata=metadata,
                             stream=True,
                         ),
                         config=workflow_config(conversation_id),
-                        context={
-                            "provider": provider,
-                            "repository": repository,
-                            "tool_registry": tool_registry,
-                            "tool_max_rounds": tool_max_rounds,
-                            "observability": observability,
-                            "trace_sink": resolved_trace_sink,
-                            "pricing_model": pricing_model,
-                            "input_price_per_1m_tokens": input_price_per_1m_tokens,
-                            "output_price_per_1m_tokens": output_price_per_1m_tokens,
-                        },
+                        context=build_workflow_context(
+                            provider=provider,
+                            repository=repository,
+                            tool_registry=tool_registry,
+                            memory_manager=memory_manager,
+                            tool_max_rounds=tool_max_rounds,
+                            observability=observability,
+                            trace_sink=resolved_trace_sink,
+                            pricing_model=pricing_model,
+                            input_price_per_1m_tokens=input_price_per_1m_tokens,
+                            output_price_per_1m_tokens=output_price_per_1m_tokens,
+                        ),
                         stream_mode="custom",
                     ):
                         yield cast(WorkflowStreamEvent, event)
@@ -773,9 +888,11 @@ def initial_workflow_state(
     message: str,
     metadata: dict[str, Any] | None,
     stream: bool,
+    owner_user_id: str | None = None,
 ) -> ChatWorkflowState:
     return ChatWorkflowState(
         conversation_id=conversation_id,
+        owner_user_id=owner_user_id,
         user_message=message,
         user_metadata=metadata,
         stream=stream,
@@ -790,6 +907,7 @@ def initial_workflow_state(
         response_metadata=None,
         usage_totals=None,
         cost_totals=None,
+        persisted_user_message_id=None,
         message_started=False,
         tool_rounds=0,
         model_rounds=0,
@@ -804,14 +922,44 @@ def workflow_config(conversation_id: str) -> dict[str, dict[str, str]]:
     }
 
 
+def build_workflow_context(
+    *,
+    provider: ChatProvider,
+    repository: ChatRepository,
+    tool_registry: ToolRegistry | None,
+    memory_manager: MemoryManager | None,
+    tool_max_rounds: int,
+    observability: ObservabilityService | None,
+    trace_sink: TraceSink,
+    pricing_model: str | None,
+    input_price_per_1m_tokens: float | None,
+    output_price_per_1m_tokens: float | None,
+) -> ChatWorkflowContext:
+    return {
+        "provider": provider,
+        "repository": repository,
+        "tool_registry": tool_registry,
+        "memory_manager": memory_manager,
+        "tool_max_rounds": tool_max_rounds,
+        "observability": observability,
+        "trace_sink": trace_sink,
+        "pricing_model": pricing_model,
+        "input_price_per_1m_tokens": input_price_per_1m_tokens,
+        "output_price_per_1m_tokens": output_price_per_1m_tokens,
+    }
+
+
 def build_chat_workflow(*, checkpointer: Any | None = None) -> ChatWorkflow:
     graph_builder = StateGraph(ChatWorkflowState, context_schema=ChatWorkflowContext)
     graph_builder.add_node("load_context", load_context_node)
+    graph_builder.add_node("load_memory", load_memory_node)
     graph_builder.add_node("call_model", call_model_node)
     graph_builder.add_node("execute_tools", execute_tools_node)
     graph_builder.add_node("persist_response", persist_response_node)
+    graph_builder.add_node("write_memory", write_memory_node)
     graph_builder.add_edge(START, "load_context")
-    graph_builder.add_edge("load_context", "call_model")
+    graph_builder.add_edge("load_context", "load_memory")
+    graph_builder.add_edge("load_memory", "call_model")
     graph_builder.add_conditional_edges(
         "call_model",
         route_after_call_model,
@@ -821,7 +969,8 @@ def build_chat_workflow(*, checkpointer: Any | None = None) -> ChatWorkflow:
         },
     )
     graph_builder.add_edge("execute_tools", "call_model")
-    graph_builder.add_edge("persist_response", END)
+    graph_builder.add_edge("persist_response", "write_memory")
+    graph_builder.add_edge("write_memory", END)
 
     compiled_graph = graph_builder.compile(
         checkpointer=checkpointer or InMemorySaver(),

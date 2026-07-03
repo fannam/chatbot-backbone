@@ -9,6 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from chatbot_api.main import app, get_chat_service
+from chatbot_api.models import utcnow
 from chatbot_api.providers import (
     ChatCompletion,
     ChatCompletionMetadata,
@@ -17,7 +18,7 @@ from chatbot_api.providers import (
     ToolCallRequest,
     ToolRun,
 )
-from chatbot_api.repositories import RetrievedDocumentChunk
+from chatbot_api.repositories import MessageRecord, PersistedExchange, RetrievedDocumentChunk
 from chatbot_api.retrieval import DocumentRetriever
 from chatbot_api.services import ChatService, ChatStreamComplete, ChatStreamStart
 from chatbot_api.settings import Settings
@@ -202,7 +203,9 @@ class StubRetrieverRepository:
         *,
         query_embedding: list[float],
         limit: int,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
+        del query_embedding, owner_user_id
         return self._chunks[:limit]
 
 
@@ -230,8 +233,9 @@ class StubChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> tuple[str, ChatCompletion]:
-        del message, metadata
+        del message, metadata, owner_user_id
         return conversation_id or "generated-conv", self._completion  # type: ignore[return-value]
 
     async def stream_chat(
@@ -240,8 +244,9 @@ class StubChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> AsyncIterator[Any]:
-        del conversation_id, message, metadata
+        del conversation_id, message, metadata, owner_user_id
         for event in self._stream_events:
             yield event
 
@@ -249,10 +254,27 @@ class StubChatService:
 class InMemoryChatRepository:
     def __init__(self) -> None:
         self.messages_by_conversation: dict[str, list[ChatTurn]] = {}
+        self.message_records_by_conversation: dict[str, list[MessageRecord]] = {}
         self.tool_runs: dict[str, ToolRun] = {}
+        self._next_message_id = 1
 
-    async def list_messages(self, conversation_id: str) -> list[ChatTurn]:
+    async def list_messages(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[ChatTurn]:
+        del owner_user_id
         return list(self.messages_by_conversation.get(conversation_id, []))
+
+    async def list_message_records(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[MessageRecord]:
+        del owner_user_id
+        return list(self.message_records_by_conversation.get(conversation_id, []))
 
     async def create_tool_run(
         self,
@@ -261,8 +283,9 @@ class InMemoryChatRepository:
         tool_call_id: str,
         tool_name: str,
         input_payload: dict[str, Any],
+        owner_user_id: str | None = None,
     ) -> None:
-        del conversation_id, tool_name, input_payload
+        del conversation_id, tool_name, input_payload, owner_user_id
         self.tool_runs[tool_call_id] = ToolRun(
             tool_call_id=tool_call_id,
             tool_name="search_knowledge_base",
@@ -276,8 +299,9 @@ class InMemoryChatRepository:
         conversation_id: str,
         tool_call_id: str,
         output_payload: dict[str, Any],
+        owner_user_id: str | None = None,
     ) -> None:
-        del conversation_id, output_payload
+        del conversation_id, output_payload, owner_user_id
         self.tool_runs[tool_call_id] = ToolRun(
             tool_call_id=tool_call_id,
             tool_name="search_knowledge_base",
@@ -293,8 +317,9 @@ class InMemoryChatRepository:
         tool_call_id: str,
         status: str,
         error_message: str,
+        owner_user_id: str | None = None,
     ) -> None:
-        del conversation_id
+        del conversation_id, owner_user_id
         self.tool_runs[tool_call_id] = ToolRun(
             tool_call_id=tool_call_id,
             tool_name="search_knowledge_base",
@@ -310,13 +335,46 @@ class InMemoryChatRepository:
         user_message: str,
         user_metadata: dict[str, Any] | None,
         assistant_message: str,
-    ) -> None:
-        del user_metadata
+        owner_user_id: str | None = None,
+    ) -> PersistedExchange:
+        del user_metadata, owner_user_id
         self.messages_by_conversation.setdefault(conversation_id, []).extend(
             [
                 ChatTurn(role="user", content=user_message),
                 ChatTurn(role="assistant", content=assistant_message),
             ]
+        )
+        created_at = utcnow()
+        records = self.message_records_by_conversation.setdefault(conversation_id, [])
+        user_message_id = self._next_message_id
+        records.append(
+            MessageRecord(
+                id=user_message_id,
+                conversation_id=conversation_id,
+                role="user",
+                content=user_message,
+                metadata=None,
+                created_at=created_at,
+            )
+        )
+        self._next_message_id += 1
+        assistant_message_id = self._next_message_id
+        records.append(
+            MessageRecord(
+                id=assistant_message_id,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_message,
+                metadata=None,
+                created_at=created_at,
+            )
+        )
+        self._next_message_id += 1
+        return PersistedExchange(
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            created_at=created_at,
         )
 
 

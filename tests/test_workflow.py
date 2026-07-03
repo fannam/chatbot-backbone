@@ -8,6 +8,8 @@ import pytest
 from langgraph.runtime import Runtime
 
 from chatbot_api import workflow as workflow_module
+from chatbot_api.memory import MemoryManager, extract_rule_based_memories
+from chatbot_api.models import utcnow
 from chatbot_api.providers import (
     ChatCitation,
     ChatCompletion,
@@ -21,7 +23,14 @@ from chatbot_api.providers import (
     ToolRun,
     UsageCost,
 )
-from chatbot_api.repositories import RetrievedDocumentChunk
+from chatbot_api.repositories import (
+    ConversationSummaryRecord,
+    MemoryRecord,
+    MessageRecord,
+    PersistedExchange,
+    RetrievedDocumentChunk,
+)
+from chatbot_api.settings import Settings
 from chatbot_api.tools import ToolRegistry, build_tool_registry
 from chatbot_api.tracing import NoopTraceSink
 from chatbot_api.workflow import (
@@ -34,6 +43,7 @@ from chatbot_api.workflow import (
     call_model_node,
     initial_workflow_state,
     load_context_node,
+    load_memory_node,
     persist_response_node,
     serialize_turn,
 )
@@ -61,11 +71,28 @@ class SavedToolRun:
 class InMemoryChatRepository:
     def __init__(self) -> None:
         self.messages_by_conversation: dict[str, list[ChatTurn]] = {}
+        self.message_records_by_conversation: dict[str, list[MessageRecord]] = {}
         self.saved_exchanges: list[SavedExchange] = []
         self.tool_runs: list[SavedToolRun] = []
+        self._next_message_id = 1
 
-    async def list_messages(self, conversation_id: str) -> list[ChatTurn]:
+    async def list_messages(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[ChatTurn]:
+        del owner_user_id
         return list(self.messages_by_conversation.get(conversation_id, []))
+
+    async def list_message_records(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[MessageRecord]:
+        del owner_user_id
+        return list(self.message_records_by_conversation.get(conversation_id, []))
 
     async def create_tool_run(
         self,
@@ -74,7 +101,9 @@ class InMemoryChatRepository:
         tool_call_id: str,
         tool_name: str,
         input_payload: dict[str, Any],
+        owner_user_id: str | None = None,
     ):
+        del owner_user_id
         record = SavedToolRun(
             conversation_id=conversation_id,
             tool_call_id=tool_call_id,
@@ -93,7 +122,9 @@ class InMemoryChatRepository:
         conversation_id: str,
         tool_call_id: str,
         output_payload: dict[str, Any],
+        owner_user_id: str | None = None,
     ):
+        del owner_user_id
         for index, tool_run in enumerate(self.tool_runs):
             if (
                 tool_run.conversation_id == conversation_id
@@ -120,7 +151,9 @@ class InMemoryChatRepository:
         tool_call_id: str,
         status: str,
         error_message: str,
+        owner_user_id: str | None = None,
     ):
+        del owner_user_id
         for index, tool_run in enumerate(self.tool_runs):
             if (
                 tool_run.conversation_id == conversation_id
@@ -147,7 +180,9 @@ class InMemoryChatRepository:
         user_message: str,
         user_metadata: dict[str, Any] | None,
         assistant_message: str,
-    ) -> None:
+        owner_user_id: str | None = None,
+    ) -> PersistedExchange:
+        del owner_user_id
         self.saved_exchanges.append(
             SavedExchange(
                 conversation_id=conversation_id,
@@ -161,6 +196,38 @@ class InMemoryChatRepository:
                 ChatTurn(role="user", content=user_message),
                 ChatTurn(role="assistant", content=assistant_message),
             ]
+        )
+        created_at = utcnow()
+        records = self.message_records_by_conversation.setdefault(conversation_id, [])
+        user_message_id = self._next_message_id
+        records.append(
+            MessageRecord(
+                id=user_message_id,
+                conversation_id=conversation_id,
+                role="user",
+                content=user_message,
+                metadata=user_metadata,
+                created_at=created_at,
+            )
+        )
+        self._next_message_id += 1
+        assistant_message_id = self._next_message_id
+        records.append(
+            MessageRecord(
+                id=assistant_message_id,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_message,
+                metadata=None,
+                created_at=created_at,
+            )
+        )
+        self._next_message_id += 1
+        return PersistedExchange(
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            created_at=created_at,
         )
 
 
@@ -188,6 +255,138 @@ class ScriptedProvider:
         if not self._responses:
             raise AssertionError("provider called more times than expected")
         return self._responses.pop(0)
+
+
+class InMemoryMemoryRepository:
+    def __init__(self) -> None:
+        self.summary_by_conversation: dict[str, ConversationSummaryRecord] = {}
+        self.memories_by_user: dict[str, list[MemoryRecord]] = {}
+        self.upserted_memories: list[MemoryRecord] = []
+        self._next_memory_id = 1
+
+    async def get_conversation_summary(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ):
+        del owner_user_id
+        return self.summary_by_conversation.get(conversation_id)
+
+    async def upsert_conversation_summary(
+        self,
+        *,
+        conversation_id: str,
+        summary_text: str,
+        last_summarized_message_id: int,
+        owner_user_id: str | None = None,
+    ) -> ConversationSummaryRecord:
+        del owner_user_id
+        now = utcnow()
+        summary = ConversationSummaryRecord(
+            conversation_id=conversation_id,
+            summary_text=summary_text,
+            last_summarized_message_id=last_summarized_message_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self.summary_by_conversation[conversation_id] = summary
+        return summary
+
+    async def list_active_memories(
+        self,
+        user_id: str,
+        *,
+        limit: int,
+        owner_user_id: str | None = None,
+    ) -> list[MemoryRecord]:
+        if owner_user_id is not None and owner_user_id != user_id:
+            return []
+        return list(self.memories_by_user.get(user_id, []))[:limit]
+
+    async def upsert_memory(
+        self,
+        *,
+        user_id: str,
+        kind: str,
+        key: str,
+        value_json: dict[str, Any],
+        confidence: float,
+        source_message_id: int,
+        extraction_method: str,
+        owner_user_id: str | None = None,
+    ) -> MemoryRecord:
+        del owner_user_id
+        now = utcnow()
+        existing = None
+        for memory in self.memories_by_user.setdefault(user_id, []):
+            if memory.key == key and memory.deleted_at is None:
+                existing = memory
+                break
+        if existing is None:
+            memory = MemoryRecord(
+                id=self._next_memory_id,
+                user_id=user_id,
+                kind=kind,
+                key=key,
+                value_json=value_json,
+                confidence=confidence,
+                source_message_id=source_message_id,
+                extraction_method=extraction_method,
+                created_at=now,
+                updated_at=now,
+                deleted_at=None,
+            )
+            self._next_memory_id += 1
+            self.memories_by_user[user_id].append(memory)
+        else:
+            memory = MemoryRecord(
+                id=existing.id,
+                user_id=user_id,
+                kind=kind,
+                key=key,
+                value_json=value_json,
+                confidence=confidence,
+                source_message_id=source_message_id,
+                extraction_method=extraction_method,
+                created_at=existing.created_at,
+                updated_at=now,
+                deleted_at=None,
+            )
+            index = self.memories_by_user[user_id].index(existing)
+            self.memories_by_user[user_id][index] = memory
+        self.upserted_memories.append(memory)
+        return memory
+
+    async def delete_memory(
+        self,
+        *,
+        user_id: str,
+        memory_id: int,
+        owner_user_id: str | None = None,
+    ) -> bool:
+        if owner_user_id is not None and owner_user_id != user_id:
+            return False
+        memories = self.memories_by_user.get(user_id, [])
+        for index, memory in enumerate(memories):
+            if memory.id != memory_id:
+                continue
+            now = utcnow()
+            memories[index] = MemoryRecord(
+                id=memory.id,
+                user_id=memory.user_id,
+                kind=memory.kind,
+                key=memory.key,
+                value_json=memory.value_json,
+                confidence=memory.confidence,
+                source_message_id=memory.source_message_id,
+                extraction_method=memory.extraction_method,
+                created_at=memory.created_at,
+                updated_at=now,
+                deleted_at=now,
+            )
+            return True
+        return False
 
 
 class FailingAfterToolProvider:
@@ -222,7 +421,7 @@ class FailingAfterToolProvider:
 class StubRetriever:
     def __init__(self, chunks: list[RetrievedDocumentChunk]) -> None:
         self._chunks = chunks
-        self.queries: list[tuple[str, int, int]] = []
+        self.queries: list[tuple[str, int, int, str | None]] = []
 
     async def retrieve_chunks(
         self,
@@ -230,8 +429,9 @@ class StubRetriever:
         *,
         top_k: int | None = None,
         max_chunks_per_document: int | None = None,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
-        self.queries.append((query, top_k or 0, max_chunks_per_document or 0))
+        self.queries.append((query, top_k or 0, max_chunks_per_document or 0, owner_user_id))
         return self._chunks[: top_k or len(self._chunks)]
 
 
@@ -252,6 +452,7 @@ def build_runtime(
     provider: ScriptedProvider | FailingAfterToolProvider,
     repository: InMemoryChatRepository,
     tool_registry: ToolRegistry | None = None,
+    memory_manager: MemoryManager | None = None,
     tool_max_rounds: int = 4,
     pricing_model: str | None = "gpt-4.1-mini",
     input_price_per_1m_tokens: float | None = 0.40,
@@ -262,6 +463,7 @@ def build_runtime(
             "provider": provider,
             "repository": repository,
             "tool_registry": tool_registry,
+            "memory_manager": memory_manager,
             "tool_max_rounds": tool_max_rounds,
             "observability": None,
             "trace_sink": NoopTraceSink(),
@@ -476,7 +678,7 @@ async def test_persist_response_node_saves_exchange_and_emits_complete_event(
 
     updates = await persist_response_node(state, build_runtime(provider, repository))
 
-    assert updates == {}
+    assert updates == {"persisted_user_message_id": 1}
     assert repository.saved_exchanges == [
         SavedExchange(
             conversation_id="conv-123",
@@ -953,3 +1155,198 @@ async def test_chat_workflow_raises_after_exceeding_tool_round_limit() -> None:
             tool_registry=tool_registry,
             tool_max_rounds=1,
         )
+
+
+@pytest.mark.anyio
+async def test_load_memory_node_injects_summary_and_active_memories_into_provider_messages(
+) -> None:
+    repository = InMemoryChatRepository()
+    now = utcnow()
+    repository.messages_by_conversation["conv-memory"] = [
+        ChatTurn(role="user", content="Old question"),
+        ChatTurn(role="assistant", content="Old answer"),
+        ChatTurn(role="user", content="Recent question"),
+    ]
+    repository.message_records_by_conversation["conv-memory"] = [
+        MessageRecord(
+            id=1,
+            conversation_id="conv-memory",
+            role="user",
+            content="Old question",
+            metadata=None,
+            created_at=now,
+        ),
+        MessageRecord(
+            id=2,
+            conversation_id="conv-memory",
+            role="assistant",
+            content="Old answer",
+            metadata=None,
+            created_at=now,
+        ),
+        MessageRecord(
+            id=3,
+            conversation_id="conv-memory",
+            role="user",
+            content="Recent question",
+            metadata=None,
+            created_at=now,
+        ),
+    ]
+    memory_repository = InMemoryMemoryRepository()
+    memory_repository.summary_by_conversation["conv-memory"] = ConversationSummaryRecord(
+        conversation_id="conv-memory",
+        summary_text="Summary of older context.",
+        last_summarized_message_id=2,
+        created_at=now,
+        updated_at=now,
+    )
+    memory_repository.memories_by_user["user-123"] = [
+        MemoryRecord(
+            id=1,
+            user_id="user-123",
+            kind="preference",
+            key="preferences.language",
+            value_json={"value": "Vietnamese"},
+            confidence=0.92,
+            source_message_id=1,
+            extraction_method="rule",
+            created_at=now,
+            updated_at=now,
+            deleted_at=None,
+        )
+    ]
+    memory_manager = MemoryManager(
+        provider=ScriptedProvider([]),
+        chat_repository=repository,
+        memory_repository=memory_repository,
+        settings=Settings(memory_recent_message_window=6),
+        trace_sink=NoopTraceSink(),
+    )
+    state = initial_workflow_state(
+        conversation_id="conv-memory",
+        message="Current question",
+        metadata={"user_profile": {"user_id": "user-123"}},
+        stream=False,
+    )
+    state.update(await load_context_node(state, build_runtime(ScriptedProvider([]), repository)))
+
+    updates = await load_memory_node(
+        state,
+        build_runtime(
+            ScriptedProvider([]),
+            repository,
+            memory_manager=memory_manager,
+        ),
+    )
+
+    provider_messages = [
+        workflow_module.deserialize_turn(turn) for turn in updates["provider_messages"]
+    ]
+    assert provider_messages[0].role == "system"
+    assert "Summary of older context." in provider_messages[0].content
+    assert provider_messages[1].role == "system"
+    assert "Preferred language: Vietnamese" in provider_messages[1].content
+    assert provider_messages[2:] == [
+        ChatTurn(role="user", content="Recent question"),
+        ChatTurn(role="user", content="Current question"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_chat_workflow_writes_long_term_memory_after_persist() -> None:
+    workflow = build_chat_workflow()
+    repository = InMemoryChatRepository()
+    memory_repository = InMemoryMemoryRepository()
+    provider = ScriptedProvider(
+        [
+            ChatCompletion(
+                content="I will remember that.",
+                provider="openai",
+                model="gpt-4.1-mini",
+            ),
+            ChatCompletion(
+                content=(
+                    '{"memories":[{"kind":"profile","key":"profile.company",'
+                    '"value":"Example Inc","confidence":0.8}]}'
+                ),
+                provider="openai",
+                model="gpt-4.1-mini",
+            ),
+        ]
+    )
+    memory_manager = MemoryManager(
+        provider=provider,
+        chat_repository=repository,
+        memory_repository=memory_repository,
+        settings=Settings(memory_summary_trigger_messages=20),
+        trace_sink=NoopTraceSink(),
+    )
+
+    conversation_id, completion = await workflow.run(
+        conversation_id="conv-memory-write",
+        message="I work at Example Inc.",
+        metadata={"user_profile": {"user_id": "user-123"}},
+        provider=provider,
+        repository=repository,
+        memory_manager=memory_manager,
+    )
+
+    assert conversation_id == "conv-memory-write"
+    assert completion.content == "I will remember that."
+    assert repository.saved_exchanges[0].user_message == "I work at Example Inc."
+    assert memory_repository.upserted_memories[0].key == "profile.company"
+    assert memory_repository.upserted_memories[0].value_json == {"value": "Example Inc"}
+
+
+@pytest.mark.anyio
+async def test_chat_workflow_ignores_invalid_llm_memory_payload_and_returns_completion() -> None:
+    workflow = build_chat_workflow()
+    repository = InMemoryChatRepository()
+    memory_repository = InMemoryMemoryRepository()
+    provider = ScriptedProvider(
+        [
+            ChatCompletion(
+                content="Answer still succeeds.",
+                provider="openai",
+                model="gpt-4.1-mini",
+            ),
+            ChatCompletion(
+                content="not-json",
+                provider="openai",
+                model="gpt-4.1-mini",
+            ),
+        ]
+    )
+    memory_manager = MemoryManager(
+        provider=provider,
+        chat_repository=repository,
+        memory_repository=memory_repository,
+        settings=Settings(memory_summary_trigger_messages=20),
+        trace_sink=NoopTraceSink(),
+    )
+
+    _, completion = await workflow.run(
+        conversation_id="conv-memory-invalid",
+        message="I work at Example Inc.",
+        metadata={"user_profile": {"user_id": "user-123"}},
+        provider=provider,
+        repository=repository,
+        memory_manager=memory_manager,
+    )
+
+    assert completion.content == "Answer still succeeds."
+    assert memory_repository.upserted_memories == []
+
+
+def test_extract_rule_based_memories_captures_stable_preferences() -> None:
+    candidates = extract_rule_based_memories(
+        "Call me Alice. Respond in Vietnamese. My timezone is Asia/Ho_Chi_Minh. Be concise."
+    )
+
+    assert {candidate.key for candidate in candidates} == {
+        "profile.preferred_name",
+        "preferences.language",
+        "preferences.timezone",
+        "preferences.response_style",
+    }

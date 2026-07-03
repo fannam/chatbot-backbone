@@ -40,8 +40,13 @@ class DocumentRetriever:
         self._observability = observability
         self._trace_sink = trace_sink or NoopTraceSink()
 
-    async def retrieve(self, query: str) -> RetrievalResult | None:
-        selected_chunks = await self.retrieve_chunks(query)
+    async def retrieve(
+        self,
+        query: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> RetrievalResult | None:
+        selected_chunks = await self.retrieve_chunks(query, owner_user_id=owner_user_id)
         if not selected_chunks:
             return None
 
@@ -58,6 +63,7 @@ class DocumentRetriever:
         *,
         top_k: int | None = None,
         max_chunks_per_document: int | None = None,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
         started_at = perf_counter()
         normalized_query = query.strip()
@@ -106,6 +112,7 @@ class DocumentRetriever:
                 chunks = await self._repository.search_similar_chunks(
                     query_embedding=query_embedding,
                     limit=max(resolved_top_k, self._candidate_limit),
+                    owner_user_id=owner_user_id,
                 )
                 selected_chunks = select_retrieved_chunks(
                     chunks,

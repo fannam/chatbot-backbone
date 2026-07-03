@@ -7,8 +7,10 @@ import pytest
 from fastapi import status
 from httpx import ASGITransport, AsyncClient
 
-from chatbot_api.main import app, get_chat_repository
-from chatbot_api.repositories import ToolRunRecord
+from chatbot_api.auth import AuthenticatedUser
+from chatbot_api.main import app, get_authenticated_user, get_chat_repository
+from chatbot_api.models import utcnow
+from chatbot_api.repositories import PersistedExchange, ToolRunRecord
 
 
 @dataclass
@@ -16,10 +18,26 @@ class StubToolRunRepository:
     existing_conversation_ids: set[str]
     tool_runs_by_conversation: dict[str, list[ToolRunRecord]]
 
-    async def list_messages(self, conversation_id: str):
+    async def list_messages(self, conversation_id: str, *, owner_user_id: str | None = None):
+        del owner_user_id
         return []
 
-    async def conversation_exists(self, conversation_id: str) -> bool:
+    async def list_message_records(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ):
+        del owner_user_id
+        return []
+
+    async def conversation_exists(
+        self,
+        conversation_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> bool:
+        del owner_user_id
         return conversation_id in self.existing_conversation_ids
 
     async def list_tool_runs(
@@ -27,7 +45,9 @@ class StubToolRunRepository:
         conversation_id: str,
         *,
         limit: int,
+        owner_user_id: str | None = None,
     ) -> list[ToolRunRecord]:
+        del owner_user_id
         return list(self.tool_runs_by_conversation.get(conversation_id, []))[:limit]
 
     async def create_tool_run(self, **kwargs):
@@ -39,13 +59,26 @@ class StubToolRunRepository:
     async def fail_tool_run(self, **kwargs):
         raise NotImplementedError
 
-    async def append_exchange(self, **kwargs) -> None:
-        raise NotImplementedError
+    async def append_exchange(self, **kwargs) -> PersistedExchange:
+        conversation_id = kwargs["conversation_id"]
+        return PersistedExchange(
+            conversation_id=conversation_id,
+            user_message_id=1,
+            assistant_message_id=2,
+            created_at=utcnow(),
+        )
 
 
 def build_chat_repository_override(repository: StubToolRunRepository):
     async def override() -> StubToolRunRepository:
         return repository
+
+    return override
+
+
+def build_authenticated_user_override(user: AuthenticatedUser | None):
+    async def override() -> AuthenticatedUser | None:
+        return user
 
     return override
 
@@ -186,6 +219,35 @@ async def test_list_tool_runs_returns_not_found_for_missing_conversation(
     )
 
     response = await async_client.get("/conversations/conv-missing/tool-runs")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {"detail": "conversation not found"}
+
+
+@pytest.mark.anyio
+async def test_list_tool_runs_returns_not_found_for_other_users_conversation(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    repository = StubToolRunRepository(
+        existing_conversation_ids=set(),
+        tool_runs_by_conversation={},
+    )
+    app.dependency_overrides[get_chat_repository] = build_chat_repository_override(
+        repository
+    )
+    app.dependency_overrides[get_authenticated_user] = build_authenticated_user_override(
+        AuthenticatedUser(
+            user_id="user-self",
+            display_name=None,
+            email=None,
+            plan=None,
+            locale=None,
+            preferences={},
+        )
+    )
+
+    response = await async_client.get("/conversations/conv-foreign/tool-runs")
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     assert response.json() == {"detail": "conversation not found"}

@@ -41,7 +41,9 @@ class StubRetrieverRepository:
         *,
         query_embedding: list[float],
         limit: int,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
+        del owner_user_id
         return self._chunks[:limit]
 
 
@@ -63,7 +65,9 @@ class StubToolRetriever:
         *,
         top_k: int | None = None,
         max_chunks_per_document: int | None = None,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
+        del query, max_chunks_per_document, owner_user_id
         return self._chunks[: top_k or len(self._chunks)]
 
 
@@ -77,7 +81,9 @@ class StubChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> tuple[str, ChatCompletion]:
+        del message, metadata, owner_user_id
         return conversation_id or "generated-conv", self._completion
 
     async def stream_chat(
@@ -86,7 +92,9 @@ class StubChatService:
         conversation_id: str | None,
         message: str,
         metadata: dict[str, Any] | None,
+        owner_user_id: str | None = None,
     ) -> AsyncIterator[Any]:
+        del conversation_id, message, metadata, owner_user_id
         if False:
             yield None
 
@@ -247,6 +255,7 @@ async def test_tool_registry_metrics_and_workflow_counter_are_emitted() -> None:
         ),
         context=ToolExecutionContext(
             conversation_id="conv-observability",
+            owner_user_id=None,
             request_metadata=None,
         ),
     )

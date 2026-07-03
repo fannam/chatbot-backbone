@@ -20,6 +20,14 @@ from chatbot_api.chat_eval import (
     run_chat_eval,
 )
 from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.memory_eval import (
+    DEFAULT_DATASET_PATH as DEFAULT_MEMORY_DATASET_PATH,
+)
+from chatbot_api.memory_eval import (
+    MemoryEvalSummary,
+    load_memory_eval_dataset,
+    run_memory_eval,
+)
 from chatbot_api.models import Document
 from chatbot_api.rag_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_RAG_DATASET_PATH,
@@ -36,6 +44,7 @@ from chatbot_api.settings import Settings, get_settings
 DEFAULT_OUTPUT_DIR = Path(".artifacts")
 DEFAULT_RAG_REPORT_FILENAME = "rag-eval-report.json"
 DEFAULT_CHAT_REPORT_FILENAME = "chat-eval-report.json"
+DEFAULT_MEMORY_REPORT_FILENAME = "memory-eval-report.json"
 DEFAULT_SUITE_REPORT_FILENAME = "eval-suite-report.json"
 
 
@@ -45,6 +54,7 @@ class EvalSuiteThresholds(BaseModel):
     min_rag_document_hit_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     min_rag_chunk_hit_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     min_chat_pass_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    min_memory_pass_rate: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class EvalSuiteDatasets(BaseModel):
@@ -52,6 +62,7 @@ class EvalSuiteDatasets(BaseModel):
 
     rag_dataset_path: str
     chat_dataset_path: str
+    memory_dataset_path: str
 
 
 class CorpusPreflightFileStatus(BaseModel):
@@ -85,6 +96,7 @@ class EvalSuiteReport(BaseModel):
     corpus_preflight: CorpusPreflightReport
     rag_summary: RetrievalEvalSummary | None
     chat_summary: ChatEvalSummary | None
+    memory_summary: MemoryEvalSummary | None
     passed: bool
     failure_reasons: list[str]
 
@@ -212,6 +224,7 @@ def build_failure_reasons(
     corpus_preflight: CorpusPreflightReport,
     rag_summary: RetrievalEvalSummary | None,
     chat_summary: ChatEvalSummary | None,
+    memory_summary: MemoryEvalSummary | None,
 ) -> list[str]:
     failures: list[str] = []
 
@@ -246,6 +259,11 @@ def build_failure_reasons(
             "chat pass_rate below threshold: "
             f"{chat_summary.pass_rate:.3f} < {thresholds.min_chat_pass_rate:.3f}"
         )
+    if memory_summary is not None and memory_summary.pass_rate < thresholds.min_memory_pass_rate:
+        failures.append(
+            "memory pass_rate below threshold: "
+            f"{memory_summary.pass_rate:.3f} < {thresholds.min_memory_pass_rate:.3f}"
+        )
 
     return failures
 
@@ -254,16 +272,19 @@ async def run_eval_suite(
     *,
     rag_dataset_path: str | Path = DEFAULT_RAG_DATASET_PATH,
     chat_dataset_path: str | Path = DEFAULT_CHAT_DATASET_PATH,
+    memory_dataset_path: str | Path = DEFAULT_MEMORY_DATASET_PATH,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     min_rag_document_hit_rate: float = 1.0,
     min_rag_chunk_hit_rate: float = 1.0,
     min_chat_pass_rate: float = 1.0,
+    min_memory_pass_rate: float = 1.0,
     settings: Settings | None = None,
     embedding_provider=None,
 ) -> EvalSuiteReport:
     resolved_settings = settings or get_settings()
     rag_dataset = load_retrieval_eval_dataset(rag_dataset_path)
     chat_dataset = load_chat_eval_dataset(chat_dataset_path)
+    load_memory_eval_dataset(memory_dataset_path)
     resolved_output_dir = Path(output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,6 +292,7 @@ async def run_eval_suite(
         min_rag_document_hit_rate=min_rag_document_hit_rate,
         min_rag_chunk_hit_rate=min_rag_chunk_hit_rate,
         min_chat_pass_rate=min_chat_pass_rate,
+        min_memory_pass_rate=min_memory_pass_rate,
     )
     retrieval_config = build_eval_config(resolved_settings)
     required_filenames = collect_required_filenames(rag_dataset, chat_dataset)
@@ -281,6 +303,7 @@ async def run_eval_suite(
 
     rag_summary: RetrievalEvalSummary | None = None
     chat_summary: ChatEvalSummary | None = None
+    memory_summary: MemoryEvalSummary | None = None
 
     if corpus_preflight.passed:
         rag_report = await run_retrieval_eval(
@@ -299,17 +322,26 @@ async def run_eval_suite(
         )
         chat_summary = chat_report.summary
 
+        memory_report = await run_memory_eval(
+            dataset_path=memory_dataset_path,
+            output_path=resolved_output_dir / DEFAULT_MEMORY_REPORT_FILENAME,
+            settings=resolved_settings,
+        )
+        memory_summary = memory_report.summary
+
     failure_reasons = build_failure_reasons(
         thresholds=thresholds,
         corpus_preflight=corpus_preflight,
         rag_summary=rag_summary,
         chat_summary=chat_summary,
+        memory_summary=memory_summary,
     )
     report = EvalSuiteReport(
         generated_at=datetime.now(UTC),
         datasets=EvalSuiteDatasets(
             rag_dataset_path=str(Path(rag_dataset_path)),
             chat_dataset_path=str(Path(chat_dataset_path)),
+            memory_dataset_path=str(Path(memory_dataset_path)),
         ),
         output_dir=str(resolved_output_dir),
         retrieval_config=retrieval_config,
@@ -317,6 +349,7 @@ async def run_eval_suite(
         corpus_preflight=corpus_preflight,
         rag_summary=rag_summary,
         chat_summary=chat_summary,
+        memory_summary=memory_summary,
         passed=not failure_reasons,
         failure_reasons=failure_reasons,
     )
@@ -362,6 +395,12 @@ def format_summary(report: EvalSuiteReport) -> str:
             f"pass_rate={report.chat_summary.pass_rate:.3f}, "
             f"failed_cases={len(report.chat_summary.failed_case_ids)}"
         )
+    if report.memory_summary is not None:
+        lines.append(
+            "Memory summary: "
+            f"pass_rate={report.memory_summary.pass_rate:.3f}, "
+            f"failed_cases={len(report.memory_summary.failed_case_ids)}"
+        )
     lines.append(f"Overall: {'passed' if report.passed else 'failed'}")
     if report.failure_reasons:
         lines.append("Failures: " + "; ".join(report.failure_reasons))
@@ -388,6 +427,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Directory to write eval reports into.",
     )
     parser.add_argument(
+        "--memory-dataset",
+        default=str(DEFAULT_MEMORY_DATASET_PATH),
+        help="Path to the memory eval dataset JSON file.",
+    )
+    parser.add_argument(
         "--min-rag-document-hit-rate",
         type=float,
         default=1.0,
@@ -405,6 +449,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Minimum allowed chat/tool regression pass rate.",
     )
+    parser.add_argument(
+        "--min-memory-pass-rate",
+        type=float,
+        default=1.0,
+        help="Minimum allowed memory regression pass rate.",
+    )
     return parser
 
 
@@ -418,10 +468,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         run_eval_suite(
             rag_dataset_path=args.rag_dataset,
             chat_dataset_path=args.chat_dataset,
+            memory_dataset_path=args.memory_dataset,
             output_dir=args.output_dir,
             min_rag_document_hit_rate=args.min_rag_document_hit_rate,
             min_rag_chunk_hit_rate=args.min_rag_chunk_hit_rate,
             min_chat_pass_rate=args.min_chat_pass_rate,
+            min_memory_pass_rate=args.min_memory_pass_rate,
         )
     )
     print(format_summary(report))

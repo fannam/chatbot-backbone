@@ -10,7 +10,7 @@ from chatbot_api.tools import ToolExecutionContext, build_tool_registry, evaluat
 class StubRetriever:
     def __init__(self, chunks: list[RetrievedDocumentChunk]) -> None:
         self._chunks = chunks
-        self.calls: list[tuple[str, int, int]] = []
+        self.calls: list[tuple[str, int, int, str | None]] = []
 
     async def retrieve_chunks(
         self,
@@ -18,8 +18,9 @@ class StubRetriever:
         *,
         top_k: int | None = None,
         max_chunks_per_document: int | None = None,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
-        self.calls.append((query, top_k or 0, max_chunks_per_document or 0))
+        self.calls.append((query, top_k or 0, max_chunks_per_document or 0, owner_user_id))
         return self._chunks[: top_k or len(self._chunks)]
 
 
@@ -75,11 +76,12 @@ async def test_tool_registry_executes_search_tool_and_collects_citations() -> No
         ),
         context=ToolExecutionContext(
             conversation_id="conv-search",
+            owner_user_id=None,
             request_metadata={"source": "unit-test"},
         ),
     )
 
-    assert retriever.calls == [("guide", 2, 2)]
+    assert retriever.calls == [("guide", 2, 2, None)]
     assert result.tool_run.status == "completed"
     assert result.tool_run.output == {
         "hits": [
@@ -118,6 +120,7 @@ async def test_tool_registry_rejects_unknown_tool() -> None:
         ToolCallRequest(call_id="tool-unknown", name="not_allowed", arguments={}),
         context=ToolExecutionContext(
             conversation_id="conv-reject",
+            owner_user_id=None,
             request_metadata=None,
         ),
     )
@@ -142,6 +145,7 @@ async def test_tool_registry_returns_current_user_profile_from_request_metadata(
         ),
         context=ToolExecutionContext(
             conversation_id="conv-profile",
+            owner_user_id=None,
             request_metadata={
                 "user_profile": {
                     "user_id": "user-123",
@@ -186,6 +190,7 @@ async def test_tool_registry_returns_profile_not_found_when_metadata_is_missing(
         ),
         context=ToolExecutionContext(
             conversation_id="conv-profile-missing",
+            owner_user_id=None,
             request_metadata={"source": "unit-test"},
         ),
     )
@@ -210,6 +215,7 @@ async def test_tool_registry_returns_profile_not_found_when_metadata_is_malforme
         ),
         context=ToolExecutionContext(
             conversation_id="conv-profile-malformed",
+            owner_user_id=None,
             request_metadata={
                 "user_profile": {
                     "display_name": "Missing user id",

@@ -61,6 +61,7 @@ class DocumentRecord:
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
+    owner_user_id: str | None = None
 
 
 class DocumentRepository(Protocol):
@@ -75,6 +76,7 @@ class DocumentRepository(Protocol):
         status: str,
         failure_reason: str | None = None,
         chunks: list[DocumentChunkCreate],
+        owner_user_id: str | None = None,
     ) -> DocumentRecord: ...
 
 
@@ -229,6 +231,7 @@ class DocumentIngestionService:
         filename: str,
         content_type: str | None,
         content: bytes,
+        owner_user_id: str | None = None,
     ) -> tuple[DocumentRecord, int]:
         if len(content) > self._max_bytes:
             raise DocumentTooLargeError("document exceeds maximum allowed size")
@@ -243,6 +246,7 @@ class DocumentIngestionService:
             raise DocumentContentError("document text is empty")
         record = await self._repository.create_document(
             document_id=str(uuid4()),
+            owner_user_id=owner_user_id,
             filename=filename,
             content_type=extracted.content_type,
             byte_size=len(content),

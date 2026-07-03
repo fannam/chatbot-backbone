@@ -26,15 +26,16 @@ class StubEmbeddingProvider:
 class StubDocumentRepository:
     def __init__(self, chunks: list[RetrievedDocumentChunk]) -> None:
         self._chunks = chunks
-        self.calls: list[tuple[list[float], int]] = []
+        self.calls: list[tuple[list[float], int, str | None]] = []
 
     async def search_similar_chunks(
         self,
         *,
         query_embedding: list[float],
         limit: int,
+        owner_user_id: str | None = None,
     ) -> list[RetrievedDocumentChunk]:
-        self.calls.append((query_embedding, limit))
+        self.calls.append((query_embedding, limit, owner_user_id))
         return self._chunks[:limit]
 
 
@@ -102,7 +103,7 @@ async def test_retriever_filters_low_score_candidates_and_returns_none() -> None
 
     assert result is None
     assert embedding_provider.calls == [["what does the guide say?"]]
-    assert repository.calls == [([0.5, 0.5], 12)]
+    assert repository.calls == [([0.5, 0.5], 12, None)]
 
 
 @pytest.mark.anyio

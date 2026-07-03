@@ -185,3 +185,41 @@ class ConversationToolRunsResponse(BaseModel):
 
     conversation_id: str
     tool_runs: list[ToolRunRecordPayload] = Field(default_factory=list)
+
+
+class ConversationMemorySummaryPayload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str
+    summary_text: str
+    last_summarized_message_id: int
+    updated_at: datetime
+
+
+class ConversationMemoryResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str
+    summary: ConversationMemorySummaryPayload | None = None
+
+
+class UserMemoryPayload(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    user_id: str
+    kind: Literal["profile", "preference"]
+    key: str
+    value_json: dict[str, Any]
+    confidence: float
+    source_message_id: int
+    extraction_method: Literal["rule", "llm"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserMemoriesResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str
+    memories: list[UserMemoryPayload] = Field(default_factory=list)

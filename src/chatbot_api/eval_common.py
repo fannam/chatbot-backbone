@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from chatbot_api.models import Conversation, Message, utcnow
 
 
 class ExpectedSource(BaseModel):
@@ -65,3 +69,74 @@ def source_matches_reference(
     if expected_source.document_id is not None and expected_source.document_id != document_id:
         return False
     return True
+
+
+def is_deep_subset(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(
+            key in actual and is_deep_subset(expected_value, actual[key])
+            for key, expected_value in expected.items()
+        )
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return False
+        if len(expected) > len(actual):
+            return False
+        return all(
+            is_deep_subset(expected_item, actual_item)
+            for expected_item, actual_item in zip(expected, actual, strict=True)
+        )
+
+    return expected == actual
+
+
+def write_report(path: str | Path, report: BaseModel) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+
+class HistoryTurnLike(Protocol):
+    role: str
+    content: str
+
+
+async def seed_history(
+    session: Any,
+    *,
+    conversation_id: str,
+    history: Sequence[HistoryTurnLike],
+    owner_user_id: str | None = None,
+) -> None:
+    if not history:
+        return
+
+    timestamp = utcnow()
+    conversation = await session.get(Conversation, conversation_id)
+    if conversation is None:
+        conversation = Conversation(
+            id=conversation_id,
+            owner_user_id=owner_user_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        session.add(conversation)
+    else:
+        conversation.updated_at = timestamp
+
+    session.add_all(
+        [
+            Message(
+                conversation_id=conversation_id,
+                role=turn.role,
+                content=turn.content,
+                metadata_=None,
+                created_at=timestamp,
+            )
+            for turn in history
+        ]
+    )
+    await session.commit()
