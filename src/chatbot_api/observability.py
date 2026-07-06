@@ -365,6 +365,18 @@ class ObservabilityService:
     ) -> None:
         self.increment("moderation_checks_total", labels={"outcome": outcome})
 
+    def record_guardrail_check(
+        self,
+        *,
+        direction: str,
+        check: str,
+        outcome: str,
+    ) -> None:
+        self.increment(
+            "guardrail_checks_total",
+            labels={"direction": direction, "check": check, "outcome": outcome},
+        )
+
     def record_document_embedding_job(
         self,
         *,
@@ -561,6 +573,12 @@ def build_metric_definitions() -> list[MetricDefinition]:
             kind="counter",
             description="Total content moderation checks by outcome.",
             labels=("outcome",),
+        ),
+        MetricDefinition(
+            name="guardrail_checks_total",
+            kind="counter",
+            description="Total input/output guardrail checks by direction, check, and outcome.",
+            labels=("direction", "check", "outcome"),
         ),
         MetricDefinition(
             name="document_embedding_jobs_total",

@@ -411,6 +411,60 @@ When tool execution succeeds, the `message_complete` payload can include both
 can also include aggregated `metadata.usage` and `metadata.cost` for the full
 chat request, including extra model rounds triggered by tool calling.
 
+## Guardrails
+
+Guardrails are built on [Guardrails AI](https://github.com/guardrails-ai/guardrails)
+(`AsyncGuard`), using only locally-defined custom validators
+(`src/chatbot_api/guardrails.py`) — no Guardrails Hub account or API key is
+required, and no validator ever calls out to a third party (the Hub's usage
+telemetry is explicitly disabled at import time; see the module docstring for
+details). Four independent, opt-in checks are layered on `POST /chat`:
+
+- **Input moderation** (`MODERATION_ENABLED`): the existing OpenAI Moderation
+  API check on the user's message, unchanged from Phase 6.
+- **Input jailbreak heuristic** (`JAILBREAK_DETECTION_ENABLED`): a regex-based
+  scan of the user's message for common jailbreak/prompt-injection phrasing
+  (e.g. "ignore previous instructions", "you are now DAN"). A match returns
+  `400 Bad Request` before the workflow runs.
+- **Input PII detection** (`PII_DETECTION_ENABLED`): a regex/heuristic scan
+  for email, phone, credit-card (Luhn-checked), and generic long-digit IDs in
+  the user's message. This is **log-only** — it never blocks or alters the
+  message, only records a `guardrail.input.pii_detected` audit event.
+- **Output guardrails** (`OUTPUT_GUARDRAILS_ENABLED`): runs after the LLM
+  produces its final response and before it is persisted or streamed back to
+  the client (a new `output_guardrail` node between `call_model` and
+  `persist_response` in the LangGraph workflow). PII in the response is
+  redacted in place (`[REDACTED_EMAIL]`, `[REDACTED_PHONE]`,
+  `[REDACTED_CARD]`, `[REDACTED_ID]`); a flagged moderation result substitutes
+  a canned refusal message instead of the model's actual response.
+
+Audit log events: `guardrail.input.blocked`, `guardrail.input.pii_detected`,
+`guardrail.output.redacted`, `guardrail.output.blocked`. Metric:
+`guardrail_checks_total{direction,check,outcome}`.
+
+Run the jailbreak/PII regression eval to sanity-check the heuristics against a
+curated set of true positives, deliberate false-positive traps, and PII cases:
+
+```bash
+uv run python -m chatbot_api.guardrails_eval --dataset evals/guardrails_jailbreak.json
+```
+
+**What this does NOT cover:**
+
+- The jailbreak heuristic is pattern-based, not adversarially robust — a
+  paraphrased or novel attack can still get through. Treat it as one signal
+  among several (system prompt, moderation, output guardrails), not a silver
+  bullet.
+- Tool output (e.g. `search_knowledge_base` results) is **not** re-checked by
+  the output guard before being fed back into the next model round. This is
+  explicitly out of scope because all current tools only operate on the
+  organization's own trusted, pre-ingested documents, not arbitrary external
+  content — this would need revisiting if a future tool ever fetches
+  untrusted external content (e.g. web browsing).
+- PII detection is regex/heuristic-based, not an NER model, so it will miss
+  unusual formats and can false-positive on PII-shaped-but-not-PII numbers
+  (only credit cards are precision-checked, via a Luhn checksum).
+
 ## Quality checks
 
 Run tests:
@@ -617,6 +671,13 @@ You can relax them with `--min-rag-document-hit-rate`,
   Moderation API before it reaches the workflow; off by default
 - `MODERATION_MODEL`: moderation model used when `MODERATION_ENABLED=true`,
   defaults to `omni-moderation-latest`
+- `JAILBREAK_DETECTION_ENABLED`: scan `POST /chat` messages for common
+  jailbreak/prompt-injection phrasing before the workflow runs; off by default
+- `PII_DETECTION_ENABLED`: log (never block) detected PII in `POST /chat`
+  messages; off by default
+- `OUTPUT_GUARDRAILS_ENABLED`: redact PII and hard-block flagged responses
+  from the LLM before they are persisted or streamed back to the client; off
+  by default
 - `MEMORY_ENABLED`: enables short-term and long-term memory nodes in the workflow
 - `MEMORY_RECENT_MESSAGE_WINDOW`: number of newest raw messages kept outside the rolling summary
 - `MEMORY_SUMMARY_TRIGGER_MESSAGES`: unsummarized message count required before refreshing the rolling summary

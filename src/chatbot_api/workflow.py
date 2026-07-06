@@ -9,6 +9,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
+from chatbot_api.guardrails import AsyncGuard, GuardrailsValidationError
 from chatbot_api.memory import MemoryManager, build_base_system_message
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
@@ -118,6 +119,7 @@ class ChatWorkflowContext(TypedDict):
     repository: ChatRepository
     tool_registry: ToolRegistry | None
     memory_manager: MemoryManager | None
+    output_guard: AsyncGuard | None
     tool_max_rounds: int
     observability: ObservabilityService | None
     trace_sink: TraceSink
@@ -628,6 +630,68 @@ async def execute_tools_node(
         return updates
 
 
+OUTPUT_GUARDRAIL_REFUSAL_MESSAGE = (
+    "I'm not able to share that response as written. Please rephrase your "
+    "request, or let me know if you'd like me to try answering differently."
+)
+
+
+async def output_guardrail_node(
+    state: ChatWorkflowState,
+    runtime: Runtime[ChatWorkflowContext],
+) -> dict[str, Any]:
+    output_guard = runtime.context["output_guard"]
+    if output_guard is None or state["assistant_message"] is None:
+        return {}
+
+    span = runtime.context["trace_sink"].start_span(
+        "workflow.output_guardrail",
+        inputs={"conversation_id": state["conversation_id"]},
+        metadata={"node": "output_guardrail"},
+        tags=["workflow", "node:output_guardrail"],
+    )
+    with span:
+        try:
+            outcome = await output_guard.validate(state["assistant_message"])
+        except GuardrailsValidationError:
+            record_guardrail_check(
+                runtime.context["observability"],
+                direction="output",
+                check="moderation",
+                outcome="blocked",
+            )
+            span.finish_success(outputs={"outcome": "blocked"})
+            return {"assistant_message": OUTPUT_GUARDRAIL_REFUSAL_MESSAGE}
+
+        redacted = outcome.validated_output
+        if redacted != state["assistant_message"]:
+            record_guardrail_check(
+                runtime.context["observability"],
+                direction="output",
+                check="pii",
+                outcome="redacted",
+            )
+            span.finish_success(outputs={"outcome": "redacted"})
+            return {"assistant_message": redacted}
+
+        span.finish_success(outputs={"outcome": "passed"})
+        return {}
+
+
+def record_guardrail_check(
+    observability: ObservabilityService | None,
+    *,
+    direction: str,
+    check: str,
+    outcome: str,
+) -> None:
+    if observability is None:
+        return
+    observability.record_guardrail_check(direction=direction, check=check, outcome=outcome)
+    event = "guardrail.output.blocked" if outcome == "blocked" else "guardrail.output.redacted"
+    observability.log_event(event, level="warning" if outcome == "blocked" else "info", check=check)
+
+
 async def persist_response_node(
     state: ChatWorkflowState,
     runtime: Runtime[ChatWorkflowContext],
@@ -754,6 +818,7 @@ class ChatWorkflow:
         repository: ChatRepository,
         tool_registry: ToolRegistry | None = None,
         memory_manager: MemoryManager | None = None,
+        output_guard: AsyncGuard | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -794,6 +859,7 @@ class ChatWorkflow:
                                 repository=repository,
                                 tool_registry=tool_registry,
                                 memory_manager=memory_manager,
+                                output_guard=output_guard,
                                 tool_max_rounds=tool_max_rounds,
                                 observability=observability,
                                 trace_sink=resolved_trace_sink,
@@ -851,6 +917,7 @@ class ChatWorkflow:
         repository: ChatRepository,
         tool_registry: ToolRegistry | None = None,
         memory_manager: MemoryManager | None = None,
+        output_guard: AsyncGuard | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -889,6 +956,7 @@ class ChatWorkflow:
                             repository=repository,
                             tool_registry=tool_registry,
                             memory_manager=memory_manager,
+                            output_guard=output_guard,
                             tool_max_rounds=tool_max_rounds,
                             observability=observability,
                             trace_sink=resolved_trace_sink,
@@ -965,6 +1033,7 @@ def build_workflow_context(
     repository: ChatRepository,
     tool_registry: ToolRegistry | None,
     memory_manager: MemoryManager | None,
+    output_guard: AsyncGuard | None,
     tool_max_rounds: int,
     observability: ObservabilityService | None,
     trace_sink: TraceSink,
@@ -977,6 +1046,7 @@ def build_workflow_context(
         "repository": repository,
         "tool_registry": tool_registry,
         "memory_manager": memory_manager,
+        "output_guard": output_guard,
         "tool_max_rounds": tool_max_rounds,
         "observability": observability,
         "trace_sink": trace_sink,
@@ -992,6 +1062,7 @@ def build_chat_workflow(*, checkpointer: Any | None = None) -> ChatWorkflow:
     graph_builder.add_node("load_memory", load_memory_node)
     graph_builder.add_node("call_model", call_model_node)
     graph_builder.add_node("execute_tools", execute_tools_node)
+    graph_builder.add_node("output_guardrail", output_guardrail_node)
     graph_builder.add_node("persist_response", persist_response_node)
     graph_builder.add_node("write_memory", write_memory_node)
     graph_builder.add_edge(START, "load_context")
@@ -1002,10 +1073,11 @@ def build_chat_workflow(*, checkpointer: Any | None = None) -> ChatWorkflow:
         route_after_call_model,
         {
             "execute_tools": "execute_tools",
-            "persist_response": "persist_response",
+            "persist_response": "output_guardrail",
         },
     )
     graph_builder.add_edge("execute_tools", "call_model")
+    graph_builder.add_edge("output_guardrail", "persist_response")
     graph_builder.add_edge("persist_response", "write_memory")
     graph_builder.add_edge("write_memory", END)
 

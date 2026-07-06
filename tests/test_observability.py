@@ -201,6 +201,24 @@ def test_record_auth_attempt_updates_metrics_by_outcome() -> None:
     assert 'auth_attempts_total{outcome="invalid_key"} 2' in metrics_output
 
 
+def test_record_guardrail_check_updates_metrics_by_direction_check_outcome() -> None:
+    observability = ObservabilityService(Settings())
+
+    observability.record_guardrail_check(direction="input", check="jailbreak", outcome="blocked")
+    observability.record_guardrail_check(direction="output", check="pii", outcome="redacted")
+    observability.record_guardrail_check(direction="output", check="pii", outcome="redacted")
+
+    metrics_output = observability.render_metrics()
+    assert (
+        'guardrail_checks_total{direction="input",check="jailbreak",outcome="blocked"} 1'
+        in metrics_output
+    )
+    assert (
+        'guardrail_checks_total{direction="output",check="pii",outcome="redacted"} 2'
+        in metrics_output
+    )
+
+
 def test_structured_logs_include_request_id() -> None:
     context_token = bind_request_context(request_id="req-log-1")
     try:

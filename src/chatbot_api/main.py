@@ -39,6 +39,12 @@ from chatbot_api.embeddings import (
     EmbeddingProviderTimeoutError,
     OpenAIEmbeddingProvider,
 )
+from chatbot_api.guardrails import (
+    AsyncGuard,
+    GuardrailsValidationError,
+    build_input_guard,
+    build_output_guard,
+)
 from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import (
     ObservabilityService,
@@ -447,6 +453,7 @@ def create_app() -> FastAPI:
         raw_request: Request,
         service: ChatService = Depends(get_chat_service),
         moderation_provider: ChatProvider | None = Depends(get_optional_moderation_provider),
+        input_guard: AsyncGuard | None = Depends(get_optional_input_guard),
         settings: Settings = Depends(get_settings),
         observability: ObservabilityService = Depends(get_observability),
         trace_sink: TraceSink = Depends(get_trace_sink),
@@ -474,6 +481,12 @@ def create_app() -> FastAPI:
                         status_code=400, detail="message violates content policy"
                     )
                 observability.record_moderation_check(outcome="allowed")
+
+            await run_input_guardrails(
+                request.message,
+                input_guard=input_guard,
+                observability=observability,
+            )
 
             effective_metadata = merge_request_metadata_with_authenticated_user(
                 request.metadata,
@@ -1098,6 +1111,66 @@ async def get_observability(
     return get_app_observability(request.app)
 
 
+async def get_optional_input_guard(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    observability: ObservabilityService = Depends(get_observability),
+) -> AsyncGuard | None:
+    if not (settings.jailbreak_detection_enabled or settings.pii_detection_enabled):
+        return None
+    guard = getattr(request.app.state, "input_guard", None)
+    if guard is None:
+        guard = build_input_guard(
+            jailbreak_detection_enabled=settings.jailbreak_detection_enabled,
+            pii_detection_enabled=settings.pii_detection_enabled,
+            observability=observability,
+        )
+        request.app.state.input_guard = guard
+    return guard
+
+
+async def run_input_guardrails(
+    message: str,
+    *,
+    input_guard: AsyncGuard | None,
+    observability: ObservabilityService,
+) -> None:
+    if input_guard is None:
+        return
+    try:
+        await input_guard.validate(message)
+    except GuardrailsValidationError as exc:
+        observability.record_guardrail_check(
+            direction="input", check="jailbreak", outcome="blocked"
+        )
+        observability.log_event(
+            "guardrail.input.blocked",
+            level="warning",
+            message_chars=len(message),
+        )
+        raise HTTPException(status_code=400, detail="message violates input policy") from exc
+
+
+async def get_optional_output_guard(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    trace_sink: TraceSink = Depends(get_trace_sink),
+) -> AsyncGuard | None:
+    if not settings.output_guardrails_enabled:
+        return None
+    guard = getattr(request.app.state, "output_guard", None)
+    if guard is None:
+        chat_provider = await get_chat_provider(request, settings=settings, trace_sink=trace_sink)
+        moderation_client = getattr(chat_provider, "raw_client", None)
+        guard = build_output_guard(
+            output_guardrails_enabled=True,
+            moderation_client=moderation_client,
+            moderation_model=settings.moderation_model,
+        )
+        request.app.state.output_guard = guard
+    return guard
+
+
 async def get_authenticated_user(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -1264,6 +1337,7 @@ async def get_chat_service(
     workflow: ChatWorkflow = Depends(get_chat_workflow),
     tool_registry: ToolRegistry = Depends(get_tool_registry),
     memory_manager: MemoryManager | None = Depends(get_memory_manager),
+    output_guard: AsyncGuard | None = Depends(get_optional_output_guard),
     settings: Settings = Depends(get_settings),
     observability: ObservabilityService = Depends(get_observability),
     trace_sink: TraceSink = Depends(get_trace_sink),
@@ -1274,6 +1348,7 @@ async def get_chat_service(
         workflow,
         tool_registry=tool_registry,
         memory_manager=memory_manager,
+        output_guard=output_guard,
         tool_max_rounds=settings.tool_max_rounds,
         observability=observability,
         pricing_model=settings.openai_model,

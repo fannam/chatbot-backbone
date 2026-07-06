@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from chatbot_api.guardrails import AsyncGuard
 from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
@@ -72,6 +73,7 @@ class ChatService:
         workflow: ChatWorkflow | None = None,
         tool_registry: ToolRegistry | None = None,
         memory_manager: MemoryManager | None = None,
+        output_guard: AsyncGuard | None = None,
         tool_max_rounds: int = 4,
         observability: ObservabilityService | None = None,
         pricing_model: str | None = None,
@@ -84,6 +86,7 @@ class ChatService:
         self._workflow = workflow or build_chat_workflow()
         self._tool_registry = tool_registry
         self._memory_manager = memory_manager
+        self._output_guard = output_guard
         self._tool_max_rounds = tool_max_rounds
         self._observability = observability
         self._pricing_model = pricing_model
@@ -109,6 +112,7 @@ class ChatService:
             repository=self._repository,
             tool_registry=self._tool_registry,
             memory_manager=self._memory_manager,
+            output_guard=self._output_guard,
             tool_max_rounds=self._tool_max_rounds,
             observability=self._observability,
             pricing_model=self._pricing_model,
@@ -142,6 +146,7 @@ class ChatService:
             repository=self._repository,
             tool_registry=self._tool_registry,
             memory_manager=self._memory_manager,
+            output_guard=self._output_guard,
             tool_max_rounds=self._tool_max_rounds,
             observability=self._observability,
             pricing_model=self._pricing_model,

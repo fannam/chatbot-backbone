@@ -42,6 +42,9 @@ class Settings(BaseModel):
     rate_limit_requests_per_minute: int = 60
     moderation_enabled: bool = False
     moderation_model: str = "omni-moderation-latest"
+    jailbreak_detection_enabled: bool = False
+    pii_detection_enabled: bool = False
+    output_guardrails_enabled: bool = False
     memory_enabled: bool = True
     memory_recent_message_window: int = 6
     memory_summary_trigger_messages: int = 12
@@ -152,6 +155,9 @@ def get_settings() -> Settings:
         ),
         moderation_enabled=parse_bool_env("MODERATION_ENABLED", False),
         moderation_model=os.getenv("MODERATION_MODEL", "omni-moderation-latest"),
+        jailbreak_detection_enabled=parse_bool_env("JAILBREAK_DETECTION_ENABLED", False),
+        pii_detection_enabled=parse_bool_env("PII_DETECTION_ENABLED", False),
+        output_guardrails_enabled=parse_bool_env("OUTPUT_GUARDRAILS_ENABLED", False),
         memory_enabled=parse_bool_env("MEMORY_ENABLED", True),
         memory_recent_message_window=int(os.getenv("MEMORY_RECENT_MESSAGE_WINDOW", "6")),
         memory_summary_trigger_messages=int(

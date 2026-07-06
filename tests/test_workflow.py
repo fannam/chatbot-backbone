@@ -8,8 +8,10 @@ import pytest
 from langgraph.runtime import Runtime
 
 from chatbot_api import workflow as workflow_module
+from chatbot_api.guardrails import AsyncGuard, build_output_guard
 from chatbot_api.memory import MemoryManager, extract_rule_based_memories
 from chatbot_api.models import utcnow
+from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
     ChatCitation,
     ChatCompletion,
@@ -46,6 +48,7 @@ from chatbot_api.workflow import (
     load_context_node,
     load_memory_node,
     merge_citations,
+    output_guardrail_node,
     persist_response_node,
     serialize_turn,
 )
@@ -455,10 +458,12 @@ def build_runtime(
     repository: InMemoryChatRepository,
     tool_registry: ToolRegistry | None = None,
     memory_manager: MemoryManager | None = None,
+    output_guard: AsyncGuard | None = None,
     tool_max_rounds: int = 4,
     pricing_model: str | None = "gpt-4.1-mini",
     input_price_per_1m_tokens: float | None = 0.40,
     output_price_per_1m_tokens: float | None = 1.60,
+    observability: ObservabilityService | None = None,
 ) -> Runtime[dict[str, Any]]:
     return Runtime(
         context={
@@ -466,8 +471,9 @@ def build_runtime(
             "repository": repository,
             "tool_registry": tool_registry,
             "memory_manager": memory_manager,
+            "output_guard": output_guard,
             "tool_max_rounds": tool_max_rounds,
-            "observability": None,
+            "observability": observability,
             "trace_sink": NoopTraceSink(),
             "pricing_model": pricing_model,
             "input_price_per_1m_tokens": input_price_per_1m_tokens,
@@ -634,6 +640,65 @@ async def test_call_model_node_keeps_usage_and_skips_cost_without_pricing() -> N
         },
     }
     assert updates["cost_totals"] is None
+
+
+@pytest.mark.anyio
+async def test_output_guardrail_node_passes_through_when_guard_is_none() -> None:
+    repository = InMemoryChatRepository()
+    provider = ScriptedProvider([])
+    state = initial_workflow_state(
+        conversation_id="conv-123", message="Hello", metadata=None, stream=False
+    )
+    state["assistant_message"] = "Hello from the workflow"
+
+    updates = await output_guardrail_node(
+        state, build_runtime(provider, repository, output_guard=None)
+    )
+
+    assert updates == {}
+
+
+@pytest.mark.anyio
+async def test_output_guardrail_node_redacts_pii_in_assistant_message() -> None:
+    repository = InMemoryChatRepository()
+    provider = ScriptedProvider([])
+    guard = build_output_guard(
+        output_guardrails_enabled=True,
+        moderation_client=None,
+        moderation_model="omni-moderation-latest",
+    )
+    state = initial_workflow_state(
+        conversation_id="conv-123", message="Hello", metadata=None, stream=False
+    )
+    state["assistant_message"] = "you can reach me at jane@example.com"
+
+    updates = await output_guardrail_node(
+        state, build_runtime(provider, repository, output_guard=guard)
+    )
+
+    assert updates == {"assistant_message": "you can reach me at [REDACTED_EMAIL]"}
+
+
+@pytest.mark.anyio
+async def test_output_guardrail_node_substitutes_refusal_message_on_hard_block() -> None:
+    class AlwaysBlockGuard:
+        async def validate(self, value: str):
+            from chatbot_api.guardrails import GuardrailsValidationError
+
+            raise GuardrailsValidationError("blocked for test")
+
+    repository = InMemoryChatRepository()
+    provider = ScriptedProvider([])
+    state = initial_workflow_state(
+        conversation_id="conv-123", message="Hello", metadata=None, stream=False
+    )
+    state["assistant_message"] = "some response"
+
+    updates = await output_guardrail_node(
+        state, build_runtime(provider, repository, output_guard=AlwaysBlockGuard())
+    )
+
+    assert updates == {"assistant_message": workflow_module.OUTPUT_GUARDRAIL_REFUSAL_MESSAGE}
 
 
 @pytest.mark.anyio
@@ -867,6 +932,56 @@ async def test_chat_workflow_runs_sync_end_to_end_with_tool_execution() -> None:
         user_message="What does the guide say?",
         user_metadata={"source": "thread"},
         assistant_message="Grounded answer",
+    )
+
+
+@pytest.mark.anyio
+async def test_chat_workflow_applies_output_guard_after_tool_execution_round() -> None:
+    workflow = build_chat_workflow()
+    repository = InMemoryChatRepository()
+    provider = ScriptedProvider(
+        [
+            ToolCallBatch(
+                tool_calls=[
+                    ToolCallRequest(
+                        call_id="tool-1",
+                        name="calculator",
+                        arguments={"expression": "1 + 1"},
+                    )
+                ],
+                provider="openai",
+                model="gpt-4.1-mini",
+                response_id="resp-1",
+            ),
+            ChatCompletion(
+                content="you can reach support at help@example.com",
+                provider="openai",
+                model="gpt-4.1-mini",
+                response_id="resp-2",
+            ),
+        ]
+    )
+    tool_registry = make_tool_registry()
+    output_guard = build_output_guard(
+        output_guardrails_enabled=True,
+        moderation_client=None,
+        moderation_model="omni-moderation-latest",
+    )
+
+    conversation_id, completion = await workflow.run(
+        conversation_id="conv-guard",
+        message="Loop with a tool then answer",
+        metadata=None,
+        provider=provider,
+        repository=repository,
+        tool_registry=tool_registry,
+        output_guard=output_guard,
+    )
+
+    assert conversation_id == "conv-guard"
+    assert completion.content == "you can reach support at [REDACTED_EMAIL]"
+    assert repository.saved_exchanges[-1].assistant_message == (
+        "you can reach support at [REDACTED_EMAIL]"
     )
 
 
