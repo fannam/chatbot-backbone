@@ -1051,6 +1051,21 @@ class SqlAlchemyDocumentRepository:
 
         return self._document_to_record(document)
 
+    async def find_document_by_checksum(
+        self,
+        checksum_sha256: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> DocumentRecord | None:
+        stmt = select(Document).where(Document.checksum_sha256 == checksum_sha256)
+        if owner_user_id is not None:
+            stmt = stmt.where(Document.owner_user_id == owner_user_id)
+        stmt = stmt.order_by(Document.created_at.desc()).limit(1)
+
+        result = await self._session.execute(stmt)
+        document = result.scalar_one_or_none()
+        return None if document is None else self._document_to_record(document)
+
     async def list_document_chunks(self, document_id: str) -> list[DocumentChunkCreate]:
         result = await self._session.execute(
             select(

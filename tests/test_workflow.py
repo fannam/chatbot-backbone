@@ -518,6 +518,7 @@ async def test_load_context_node_replays_history_and_appends_current_user_messag
         serialize_turn(ChatTurn(role="assistant", content="Earlier answer")),
     ]
     assert updates["provider_messages"] == [
+        serialize_turn(workflow_module.build_base_system_message()),
         serialize_turn(ChatTurn(role="user", content="Earlier question")),
         serialize_turn(ChatTurn(role="assistant", content="Earlier answer")),
         serialize_turn(ChatTurn(role="user", content="New question")),
@@ -1114,7 +1115,9 @@ async def test_chat_workflow_stream_emits_error_event_and_skips_persistence_on_f
 
 
 @pytest.mark.anyio
-async def test_chat_workflow_raises_after_exceeding_tool_round_limit() -> None:
+async def test_chat_workflow_persists_synthetic_message_after_exceeding_tool_round_limit() -> (
+    None
+):
     workflow = build_chat_workflow()
     repository = InMemoryChatRepository()
     provider = ScriptedProvider(
@@ -1147,16 +1150,63 @@ async def test_chat_workflow_raises_after_exceeding_tool_round_limit() -> None:
     )
     tool_registry = make_tool_registry()
 
-    with pytest.raises(ChatProviderError, match="tool call limit"):
-        await workflow.run(
-            conversation_id="conv-123",
-            message="Loop forever",
-            metadata=None,
-            provider=provider,
-            repository=repository,
-            tool_registry=tool_registry,
-            tool_max_rounds=1,
-        )
+    conversation_id, completion = await workflow.run(
+        conversation_id="conv-123",
+        message="Loop forever",
+        metadata=None,
+        provider=provider,
+        repository=repository,
+        tool_registry=tool_registry,
+        tool_max_rounds=1,
+    )
+
+    assert conversation_id == "conv-123"
+    assert completion.content == workflow_module.TOOL_ROUND_LIMIT_MESSAGE
+    assert len(repository.saved_exchanges) == 1
+    assert (
+        repository.saved_exchanges[0].assistant_message
+        == workflow_module.TOOL_ROUND_LIMIT_MESSAGE
+    )
+
+
+@pytest.mark.anyio
+async def test_call_model_node_returns_synthetic_message_when_tool_round_limit_reached() -> (
+    None
+):
+    repository = InMemoryChatRepository()
+    provider = ScriptedProvider(
+        [
+            ToolCallBatch(
+                tool_calls=[
+                    ToolCallRequest(
+                        call_id="tool-1",
+                        name="calculator",
+                        arguments={"expression": "1 + 1"},
+                    )
+                ],
+                provider="openai",
+                model="gpt-4.1-mini",
+                response_id="resp-1",
+            )
+        ]
+    )
+    state = initial_workflow_state(
+        conversation_id="conv-123",
+        message="Loop forever",
+        metadata=None,
+        stream=False,
+    )
+    state["provider_messages"] = [serialize_turn(ChatTurn(role="user", content="Loop forever"))]
+    state["tool_rounds"] = 1
+
+    updates = await call_model_node(
+        state, build_runtime(provider, repository, tool_max_rounds=1)
+    )
+
+    assert updates["assistant_message"] == workflow_module.TOOL_ROUND_LIMIT_MESSAGE
+    assert updates["pending_tool_calls"] == []
+    assert updates["provider_name"] == "openai"
+    assert updates["model_name"] == "gpt-4.1-mini"
 
 
 @pytest.mark.anyio
@@ -1246,13 +1296,37 @@ async def test_load_memory_node_injects_summary_and_active_memories_into_provide
         workflow_module.deserialize_turn(turn) for turn in updates["provider_messages"]
     ]
     assert provider_messages[0].role == "system"
-    assert "Summary of older context." in provider_messages[0].content
+    assert provider_messages[0] == workflow_module.build_base_system_message()
     assert provider_messages[1].role == "system"
-    assert "Preferred language: Vietnamese" in provider_messages[1].content
-    assert provider_messages[2:] == [
+    assert "Summary of older context." in provider_messages[1].content
+    assert provider_messages[2].role == "system"
+    assert "Preferred language: Vietnamese" in provider_messages[2].content
+    assert provider_messages[3:] == [
         ChatTurn(role="user", content="Recent question"),
         ChatTurn(role="user", content="Current question"),
     ]
+
+
+@pytest.mark.anyio
+async def test_prepare_prompt_includes_base_system_message_when_memory_disabled() -> None:
+    repository = InMemoryChatRepository()
+    memory_manager = MemoryManager(
+        provider=ScriptedProvider([]),
+        chat_repository=repository,
+        memory_repository=InMemoryMemoryRepository(),
+        settings=Settings(memory_enabled=False),
+        trace_sink=NoopTraceSink(),
+    )
+
+    state = await memory_manager.prepare_prompt(
+        conversation_id="conv-disabled",
+        history_records=[],
+        user_message="Hello",
+        user_metadata=None,
+    )
+
+    assert state.provider_messages[0] == workflow_module.build_base_system_message()
+    assert state.provider_messages[-1] == ChatTurn(role="user", content="Hello")
 
 
 @pytest.mark.anyio
@@ -1382,3 +1456,23 @@ def test_extract_rule_based_memories_captures_stable_preferences() -> None:
         "preferences.timezone",
         "preferences.response_style",
     }
+
+
+def test_extract_rule_based_memories_ignores_reported_third_person_speech() -> None:
+    candidates = extract_rule_based_memories("She told me to call me back later.")
+
+    assert "profile.preferred_name" not in {candidate.key for candidate in candidates}
+
+
+def test_extract_rule_based_memories_ignores_quoted_reported_name() -> None:
+    candidates = extract_rule_based_memories('He said, "my name is John."')
+
+    assert "profile.preferred_name" not in {candidate.key for candidate in candidates}
+
+
+def test_extract_rule_based_memories_ignores_reported_timezone_and_language() -> None:
+    candidates = extract_rule_based_memories(
+        "They mentioned they use timezone America/New_York"
+    )
+
+    assert "preferences.timezone" not in {candidate.key for candidate in candidates}

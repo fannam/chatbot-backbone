@@ -76,6 +76,22 @@ class InMemoryDocumentRepository:
             return None
         return stored.record
 
+    async def find_document_by_checksum(
+        self,
+        checksum_sha256: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> DocumentRecord | None:
+        matches = [
+            stored.record
+            for stored in self.documents.values()
+            if stored.record.checksum_sha256 == checksum_sha256
+            and (owner_user_id is None or stored.record.owner_user_id == owner_user_id)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda record: record.created_at)
+
     async def count_document_chunks(
         self,
         document_id: str,
@@ -532,6 +548,91 @@ async def test_document_upload_persists_authenticated_owner_user_id(
     assert response.status_code == 201
     document_id = response.json()["document_id"]
     assert repository.documents[document_id].record.owner_user_id == "user-123"
+
+
+@pytest.mark.anyio
+async def test_document_upload_rejects_duplicate_content_for_same_owner(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    repository = InMemoryDocumentRepository()
+    task_queue = StubDocumentTaskQueue()
+    app.dependency_overrides[get_document_service] = build_document_service_override(
+        build_document_service(repository)
+    )
+    app.dependency_overrides[get_document_repository] = build_document_repository_override(
+        repository
+    )
+    app.dependency_overrides[get_document_task_queue] = build_document_task_queue_override(
+        task_queue
+    )
+
+    first_response = await async_client.post(
+        "/documents",
+        files={"file": ("notes.txt", b"Hello world", "text/plain")},
+    )
+    assert first_response.status_code == 201
+    first_document_id = first_response.json()["document_id"]
+
+    second_response = await async_client.post(
+        "/documents",
+        files={"file": ("notes-again.txt", b"Hello world", "text/plain")},
+    )
+
+    assert second_response.status_code == 409
+    assert first_document_id in second_response.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_document_upload_allows_duplicate_content_for_different_owners(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    repository = InMemoryDocumentRepository()
+    task_queue = StubDocumentTaskQueue()
+    app.dependency_overrides[get_document_service] = build_document_service_override(
+        build_document_service(repository)
+    )
+    app.dependency_overrides[get_document_repository] = build_document_repository_override(
+        repository
+    )
+    app.dependency_overrides[get_document_task_queue] = build_document_task_queue_override(
+        task_queue
+    )
+    app.dependency_overrides[get_authenticated_user] = build_authenticated_user_override(
+        AuthenticatedUser(
+            user_id="user-a",
+            display_name=None,
+            email=None,
+            plan=None,
+            locale=None,
+            preferences={},
+        )
+    )
+
+    first_response = await async_client.post(
+        "/documents",
+        files={"file": ("notes.txt", b"Hello world", "text/plain")},
+    )
+    assert first_response.status_code == 201
+
+    app.dependency_overrides[get_authenticated_user] = build_authenticated_user_override(
+        AuthenticatedUser(
+            user_id="user-b",
+            display_name=None,
+            email=None,
+            plan=None,
+            locale=None,
+            preferences={},
+        )
+    )
+
+    second_response = await async_client.post(
+        "/documents",
+        files={"file": ("notes.txt", b"Hello world", "text/plain")},
+    )
+
+    assert second_response.status_code == 201
 
 
 @pytest.mark.anyio

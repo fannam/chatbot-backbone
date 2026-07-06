@@ -129,6 +129,11 @@ class ChatProvider(Protocol):
     ) -> ChatProviderResult: ...
 
 
+async def check_message_moderation(client: AsyncOpenAI, text: str, *, model: str) -> bool:
+    response = await client.moderations.create(input=text, model=model)
+    return any(result.flagged for result in response.results)
+
+
 class OpenAIChatProvider:
     provider_name = "openai"
 
@@ -148,6 +153,10 @@ class OpenAIChatProvider:
 
     async def aclose(self) -> None:
         await self._raw_client.close()
+
+    @property
+    def raw_client(self) -> AsyncOpenAI:
+        return self._raw_client
 
     async def generate_response(
         self,

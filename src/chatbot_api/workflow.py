@@ -9,14 +9,13 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
-from chatbot_api.memory import MemoryManager
+from chatbot_api.memory import MemoryManager, build_base_system_message
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
     ChatCitation,
     ChatCompletion,
     ChatCompletionMetadata,
     ChatProvider,
-    ChatProviderError,
     ChatTurn,
     TokenUsage,
     ToolCallBatch,
@@ -30,6 +29,11 @@ from chatbot_api.tools import ToolExecutionContext, ToolRegistry
 from chatbot_api.tracing import NoopTraceSink, TraceSink
 
 MAX_METADATA_CITATIONS = 4
+TOOL_ROUND_LIMIT_MESSAGE = (
+    "I wasn't able to finish gathering information for this request within the "
+    "allotted number of tool calls. Here is what I found so far — please "
+    "rephrase your question or ask me to continue."
+)
 
 
 class ChatWorkflowTurn(TypedDict):
@@ -203,7 +207,11 @@ async def load_context_node(
             state["conversation_id"],
             owner_user_id=state["owner_user_id"],
         )
-        provider_messages = [*history, ChatTurn(role="user", content=state["user_message"])]
+        provider_messages = [
+            build_base_system_message(),
+            *history,
+            ChatTurn(role="user", content=state["user_message"]),
+        ]
         updates = {
             "history": [serialize_turn(turn) for turn in history],
             "provider_messages": [serialize_turn(turn) for turn in provider_messages],
@@ -378,7 +386,16 @@ async def call_model_node(
                 usage=usage_totals,
                 cost=cost_totals,
             )
-            outcome = "tool_calls" if isinstance(result, ToolCallBatch) else "completed"
+            tool_limit_exceeded = isinstance(result, ToolCallBatch) and (
+                state["tool_rounds"] >= runtime.context["tool_max_rounds"]
+            )
+            outcome = (
+                "tool_limit_exceeded"
+                if tool_limit_exceeded
+                else "tool_calls"
+                if isinstance(result, ToolCallBatch)
+                else "completed"
+            )
             record_llm_round(
                 observability=runtime.context["observability"],
                 conversation_id=state["conversation_id"],
@@ -413,9 +430,29 @@ async def call_model_node(
                 updates["message_started"] = True
 
             if isinstance(result, ToolCallBatch):
-                if state["tool_rounds"] >= runtime.context["tool_max_rounds"]:
-                    llm_span.annotate(metadata={"outcome": "tool_limit_exceeded"})
-                    raise ChatProviderError("LLM provider exceeded tool call limit")
+                if tool_limit_exceeded:
+                    updates["assistant_message"] = TOOL_ROUND_LIMIT_MESSAGE
+                    updates["pending_tool_calls"] = []
+                    llm_span.finish_success(
+                        outputs={
+                            "provider": result.provider,
+                            "model": result.model,
+                            "outcome": outcome,
+                            "tool_call_count": len(result.tool_calls),
+                            "response_id": result.response_id,
+                            "usage": None if usage is None else usage.__dict__,
+                            "cost": None if cost is None else cost.__dict__,
+                        }
+                    )
+                    node_span.finish_success(
+                        outputs={
+                            "outcome": outcome,
+                            "round_index": round_index,
+                            "assistant_message_chars": len(TOOL_ROUND_LIMIT_MESSAGE),
+                        }
+                    )
+                    return updates
+
                 updates["assistant_message"] = None
                 updates["pending_tool_calls"] = [
                     serialize_tool_call(tool_call) for tool_call in result.tool_calls

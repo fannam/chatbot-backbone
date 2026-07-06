@@ -26,6 +26,10 @@ class DocumentContentError(DocumentIngestionError):
     """Raised when the uploaded file cannot be turned into usable text."""
 
 
+class DocumentDuplicateError(DocumentIngestionError):
+    """Raised when a document with identical content already exists for this owner."""
+
+
 @dataclass(frozen=True)
 class ExtractedDocument:
     content_type: str
@@ -78,6 +82,13 @@ class DocumentRepository(Protocol):
         chunks: list[DocumentChunkCreate],
         owner_user_id: str | None = None,
     ) -> DocumentRecord: ...
+
+    async def find_document_by_checksum(
+        self,
+        checksum_sha256: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> DocumentRecord | None: ...
 
 
 class DocumentTextExtractor(Protocol):
@@ -237,6 +248,15 @@ class DocumentIngestionService:
         if len(content) > self._max_bytes:
             raise DocumentTooLargeError("document exceeds maximum allowed size")
 
+        checksum = sha256(content).hexdigest()
+        existing = await self._repository.find_document_by_checksum(
+            checksum, owner_user_id=owner_user_id
+        )
+        if existing is not None:
+            raise DocumentDuplicateError(
+                f"identical document already uploaded (document_id={existing.id})"
+            )
+
         extracted = self._extractor.extract_text(
             filename=filename,
             content_type=content_type,
@@ -251,7 +271,7 @@ class DocumentIngestionService:
             filename=filename,
             content_type=extracted.content_type,
             byte_size=len(content),
-            checksum_sha256=sha256(content).hexdigest(),
+            checksum_sha256=checksum,
             status="processing",
             failure_reason=None,
             chunks=[

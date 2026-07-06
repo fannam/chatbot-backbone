@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 import pytest
 
-from chatbot_api.providers import ChatCitation
+from chatbot_api.providers import ChatCitation, ChatCompletion, ChatProviderError, ChatTurn
 from chatbot_api.repositories import RetrievedDocumentChunk
 from chatbot_api.retrieval import (
     DocumentRetriever,
     build_retrieval_prompt,
+    parse_rerank_response,
     select_retrieved_chunks,
 )
 
@@ -59,6 +61,31 @@ def make_chunk(
         metadata=None,
         score=score,
     )
+
+
+class StubChatProvider:
+    def __init__(
+        self,
+        *,
+        content: str | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._content = content
+        self._error = error
+        self.calls: list[list[ChatTurn]] = []
+
+    async def generate_response(
+        self,
+        messages: Sequence[ChatTurn],
+        *,
+        tools: Sequence[object] = (),
+        previous_response_id: str | None = None,
+        tool_outputs: Sequence[object] = (),
+    ) -> ChatCompletion:
+        self.calls.append(list(messages))
+        if self._error is not None:
+            raise self._error
+        return ChatCompletion(content=self._content or "", provider="openai", model="gpt-4.1-mini")
 
 
 @pytest.mark.anyio
@@ -195,3 +222,136 @@ def test_build_retrieval_prompt_contains_conservative_instructions() -> None:
     assert "answer conservatively" in prompt
     assert "Do not imply source-backed certainty" in prompt
     assert "[Source 1] file=guide.md document_id=doc-1 chunk=0" in prompt
+
+
+@pytest.mark.anyio
+async def test_retrieve_chunks_reorders_by_rerank_when_enabled() -> None:
+    embedding_provider = StubEmbeddingProvider([[0.1, 0.9]])
+    repository = StubDocumentRepository(
+        [
+            make_chunk(document_id="doc-1", chunk_index=0, score=0.9),
+            make_chunk(document_id="doc-2", chunk_index=0, score=0.85),
+            make_chunk(document_id="doc-3", chunk_index=0, score=0.8),
+        ]
+    )
+    chat_provider = StubChatProvider(
+        content=json.dumps(
+            {
+                "rankings": [
+                    {"index": 2, "relevance": 0.99},
+                    {"index": 0, "relevance": 0.5},
+                    {"index": 1, "relevance": 0.4},
+                ]
+            }
+        )
+    )
+    retriever = DocumentRetriever(
+        repository,
+        embedding_provider,
+        top_k=3,
+        min_score=0.0,
+        max_chunks_per_document=1,
+        candidate_limit=3,
+        chat_provider=chat_provider,
+        rerank_enabled=True,
+    )
+
+    chunks = await retriever.retrieve_chunks("summarize the docs")
+
+    assert [chunk.document_id for chunk in chunks] == ["doc-3", "doc-1", "doc-2"]
+    assert len(chat_provider.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_retrieve_chunks_falls_back_to_original_order_on_invalid_rerank_json() -> None:
+    embedding_provider = StubEmbeddingProvider([[0.1, 0.9]])
+    repository = StubDocumentRepository(
+        [
+            make_chunk(document_id="doc-1", chunk_index=0, score=0.9),
+            make_chunk(document_id="doc-2", chunk_index=0, score=0.85),
+        ]
+    )
+    chat_provider = StubChatProvider(content="not valid json")
+    retriever = DocumentRetriever(
+        repository,
+        embedding_provider,
+        top_k=2,
+        min_score=0.0,
+        max_chunks_per_document=1,
+        candidate_limit=2,
+        chat_provider=chat_provider,
+        rerank_enabled=True,
+    )
+
+    chunks = await retriever.retrieve_chunks("summarize the docs")
+
+    assert [chunk.document_id for chunk in chunks] == ["doc-1", "doc-2"]
+
+
+@pytest.mark.anyio
+async def test_retrieve_chunks_falls_back_to_original_order_on_provider_error() -> None:
+    embedding_provider = StubEmbeddingProvider([[0.1, 0.9]])
+    repository = StubDocumentRepository(
+        [
+            make_chunk(document_id="doc-1", chunk_index=0, score=0.9),
+            make_chunk(document_id="doc-2", chunk_index=0, score=0.85),
+        ]
+    )
+    chat_provider = StubChatProvider(error=ChatProviderError("boom"))
+    retriever = DocumentRetriever(
+        repository,
+        embedding_provider,
+        top_k=2,
+        min_score=0.0,
+        max_chunks_per_document=1,
+        candidate_limit=2,
+        chat_provider=chat_provider,
+        rerank_enabled=True,
+    )
+
+    chunks = await retriever.retrieve_chunks("summarize the docs")
+
+    assert [chunk.document_id for chunk in chunks] == ["doc-1", "doc-2"]
+
+
+@pytest.mark.anyio
+async def test_retrieve_chunks_never_invokes_provider_when_rerank_disabled() -> None:
+    embedding_provider = StubEmbeddingProvider([[0.1, 0.9]])
+    repository = StubDocumentRepository(
+        [
+            make_chunk(document_id="doc-1", chunk_index=0, score=0.9),
+            make_chunk(document_id="doc-2", chunk_index=0, score=0.85),
+        ]
+    )
+    chat_provider = StubChatProvider(
+        content=json.dumps({"rankings": [{"index": 1, "relevance": 0.99}]})
+    )
+    retriever = DocumentRetriever(
+        repository,
+        embedding_provider,
+        top_k=2,
+        min_score=0.0,
+        max_chunks_per_document=1,
+        candidate_limit=2,
+        chat_provider=chat_provider,
+        rerank_enabled=False,
+    )
+
+    chunks = await retriever.retrieve_chunks("summarize the docs")
+
+    assert [chunk.document_id for chunk in chunks] == ["doc-1", "doc-2"]
+    assert chat_provider.calls == []
+
+
+def test_parse_rerank_response_preserves_unmentioned_chunks() -> None:
+    chunks = [
+        make_chunk(document_id="doc-1", chunk_index=0, score=0.9),
+        make_chunk(document_id="doc-2", chunk_index=0, score=0.85),
+        make_chunk(document_id="doc-3", chunk_index=0, score=0.8),
+    ]
+    content = json.dumps({"rankings": [{"index": 2, "relevance": 0.9}]})
+
+    reranked = parse_rerank_response(content, chunks)
+
+    assert reranked is not None
+    assert [chunk.document_id for chunk in reranked] == ["doc-3", "doc-1", "doc-2"]

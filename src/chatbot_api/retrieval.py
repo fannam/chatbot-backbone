@@ -1,15 +1,88 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from time import perf_counter
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from chatbot_api.embeddings import EmbeddingProvider
+from chatbot_api.memory import strip_markdown_code_fence
 from chatbot_api.observability import ObservabilityService
-from chatbot_api.providers import ChatCitation, ChatCompletionMetadata
+from chatbot_api.providers import (
+    ChatCitation,
+    ChatCompletionMetadata,
+    ChatProvider,
+    ChatProviderError,
+    ChatTurn,
+    ToolCallBatch,
+)
 from chatbot_api.repositories import DocumentRepository, RetrievedDocumentChunk
 from chatbot_api.tracing import NoopTraceSink, TraceSink
 
 RETRIEVAL_SNIPPET_MAX_CHARS = 240
+RERANK_SYSTEM_PROMPT = (
+    "You rank retrieved document chunks by relevance to a user's query. "
+    "Return strict JSON only, never call tools."
+)
+
+
+class RerankedItem(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    index: int
+    relevance: float = Field(ge=0.0, le=1.0)
+
+
+class RerankResponse(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rankings: list[RerankedItem] = Field(default_factory=list)
+
+
+def build_rerank_prompt(query: str, chunks: list[RetrievedDocumentChunk]) -> str:
+    candidates = "\n".join(
+        f"[{index}] file={chunk.filename} chunk={chunk.chunk_index}\n{chunk.content}"
+        for index, chunk in enumerate(chunks)
+    )
+    return (
+        f"Query:\n{query}\n\n"
+        f"Candidates:\n{candidates}\n\n"
+        "Return strict JSON with shape "
+        '{"rankings":[{"index":0,"relevance":0.0}]}, '
+        "ordering the array by relevance descending. Include every candidate index "
+        "exactly once."
+    )
+
+
+def parse_rerank_response(
+    content: str,
+    chunks: list[RetrievedDocumentChunk],
+) -> list[RetrievedDocumentChunk] | None:
+    payload_text = strip_markdown_code_fence(content.strip())
+    if not payload_text:
+        return None
+
+    try:
+        raw_payload = json.loads(payload_text)
+        payload = RerankResponse.model_validate(raw_payload)
+    except (json.JSONDecodeError, ValidationError):
+        return None
+
+    ordered_items = sorted(payload.rankings, key=lambda item: item.relevance, reverse=True)
+    reranked: list[RetrievedDocumentChunk] = []
+    seen_indexes: set[int] = set()
+    for item in ordered_items:
+        if item.index in seen_indexes or not (0 <= item.index < len(chunks)):
+            continue
+        seen_indexes.add(item.index)
+        reranked.append(chunks[item.index])
+
+    for index, chunk in enumerate(chunks):
+        if index not in seen_indexes:
+            reranked.append(chunk)
+
+    return reranked
 
 
 @dataclass(frozen=True)
@@ -30,6 +103,8 @@ class DocumentRetriever:
         candidate_limit: int,
         observability: ObservabilityService | None = None,
         trace_sink: TraceSink | None = None,
+        chat_provider: ChatProvider | None = None,
+        rerank_enabled: bool = False,
     ) -> None:
         self._repository = repository
         self._embedding_provider = embedding_provider
@@ -39,6 +114,8 @@ class DocumentRetriever:
         self._candidate_limit = candidate_limit
         self._observability = observability
         self._trace_sink = trace_sink or NoopTraceSink()
+        self._chat_provider = chat_provider
+        self._rerank_enabled = rerank_enabled
 
     async def retrieve(
         self,
@@ -114,6 +191,7 @@ class DocumentRetriever:
                     limit=max(resolved_top_k, self._candidate_limit),
                     owner_user_id=owner_user_id,
                 )
+                chunks, rerank_applied = await self._rerank_candidates(normalized_query, chunks)
                 selected_chunks = select_retrieved_chunks(
                     chunks,
                     top_k=resolved_top_k,
@@ -145,9 +223,48 @@ class DocumentRetriever:
                     "selected_chunk_count": len(selected_chunks),
                     "top_score": None if not selected_chunks else selected_chunks[0].score,
                     "duration_ms": round(duration_seconds * 1000, 6),
+                    "rerank_applied": rerank_applied,
                 }
             )
             return selected_chunks
+
+    async def _rerank_candidates(
+        self,
+        query: str,
+        chunks: list[RetrievedDocumentChunk],
+    ) -> tuple[list[RetrievedDocumentChunk], bool]:
+        if not self._rerank_enabled or self._chat_provider is None or len(chunks) <= 1:
+            return chunks, False
+
+        span = self._trace_sink.start_span(
+            "retrieval.rerank",
+            run_type="llm",
+            inputs={"query": query, "candidate_count": len(chunks)},
+            tags=["retrieval", "rerank"],
+        )
+        with span:
+            try:
+                result = await self._chat_provider.generate_response(
+                    [
+                        ChatTurn(role="system", content=RERANK_SYSTEM_PROMPT),
+                        ChatTurn(role="user", content=build_rerank_prompt(query, chunks)),
+                    ]
+                )
+            except ChatProviderError as exc:
+                span.annotate(metadata={"outcome": "error", "error": str(exc)})
+                return chunks, False
+
+            if isinstance(result, ToolCallBatch):
+                span.annotate(metadata={"outcome": "invalid_tool_call"})
+                return chunks, False
+
+            reranked = parse_rerank_response(result.content, chunks)
+            if reranked is None:
+                span.annotate(metadata={"outcome": "parse_error"})
+                return chunks, False
+
+            span.finish_success(outputs={"outcome": "reranked"})
+            return reranked, True
 
     async def _embed_query(self, query: str) -> list[float]:
         embeddings = await self._embedding_provider.embed_texts([query])

@@ -838,6 +838,58 @@ async def test_document_repository_filters_document_reads_and_search_by_owner(
 
 
 @pytest.mark.anyio
+async def test_document_repository_find_by_checksum_respects_owner_scoping(
+    session_factory: sessionmaker[Session],
+) -> None:
+    session = session_factory()
+    try:
+        timestamp = utcnow()
+        session.add(
+            User(
+                id="user-123",
+                display_name="Alice",
+                email=None,
+                plan=None,
+                locale=None,
+                preferences_json={},
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+        )
+        session.commit()
+        repository = SqlAlchemyDocumentRepository(SyncAsyncSessionAdapter(session))
+        await repository.create_document(
+            document_id="doc-owned",
+            filename="owned.md",
+            content_type="text/markdown",
+            byte_size=100,
+            checksum_sha256="hash-shared",
+            status="ready",
+            failure_reason=None,
+            chunks=[],
+            owner_user_id="user-123",
+        )
+
+        same_owner_match = await repository.find_document_by_checksum(
+            "hash-shared", owner_user_id="user-123"
+        )
+        different_owner_match = await repository.find_document_by_checksum(
+            "hash-shared", owner_user_id="user-999"
+        )
+        no_owner_filter_match = await repository.find_document_by_checksum("hash-shared")
+        no_match = await repository.find_document_by_checksum("hash-missing")
+    finally:
+        session.close()
+
+    assert same_owner_match is not None
+    assert same_owner_match.id == "doc-owned"
+    assert different_owner_match is None
+    assert no_owner_filter_match is not None
+    assert no_owner_filter_match.id == "doc-owned"
+    assert no_match is None
+
+
+@pytest.mark.anyio
 async def test_document_repository_updates_status_and_lists_missing_embeddings(
     session_factory: sessionmaker[Session],
 ) -> None:

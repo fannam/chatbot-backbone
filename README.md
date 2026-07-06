@@ -219,6 +219,9 @@ Expected response shape:
 extracts text, chunks it deterministically, persists the document with
 `status=processing`, then enqueues a Celery job to generate embeddings in the
 background. Retrieval only uses documents after they are marked `ready`.
+Uploading byte-identical content already stored for the same owner (or globally
+when auth is disabled) is rejected with `409 Conflict` referencing the existing
+document's ID, based on a SHA-256 checksum computed before text extraction.
 
 Poll the document status:
 
@@ -294,6 +297,13 @@ Many Requests` with a `Retry-After` header. `GET /health` and `GET /metrics` are
 always exempt. Rate limit state is in-process only; it resets on restart and is
 not shared across multiple API replicas.
 
+Set `MODERATION_ENABLED=true` to screen every `POST /chat` message through the
+OpenAI Moderation API before it reaches the workflow. Flagged messages receive
+`400 Bad Request` and never reach the LLM, the retriever, or persistence. This
+is off by default to avoid the extra network call/cost on every chat turn; when
+enabled, a moderation-API failure fails closed (`503`) rather than letting an
+unscreened message through.
+
 ## Memory debug endpoints
 
 Phase 5 keeps `/chat` unchanged and exposes memory through separate debug
@@ -335,14 +345,19 @@ curl http://localhost:8000/metrics
 Current metrics include HTTP request totals/latency, chat request totals/latency,
 workflow totals, provider LLM request totals/latency, LLM token/cost counters,
 tool execution totals/latency, retrieval hit counters, document upload totals,
-document embedding job totals/latency, and API key authentication attempt totals.
+document embedding job totals/latency, API key authentication attempt totals,
+and content moderation check totals (`moderation_checks_total`, when
+`MODERATION_ENABLED=true`).
 
 Sensitive actions are logged as structured audit events through the same JSON log
 stream (filterable by `event` name): `auth.failed` (missing/invalid API key, with
 `reason` and, for invalid keys, `api_key_prefix`), `memory.access.forbidden`
 (cross-user access rejected on the memory debug endpoints), and
 `memory.delete.completed`/`memory.delete.rejected`. Document upload events
-(`document.upload.*`) also carry `owner_user_id` when auth is enabled.
+(`document.upload.*`) also carry `owner_user_id` when auth is enabled, and
+include a `duplicate` outcome when a byte-identical document already exists for
+the same owner. `moderation.blocked` is logged whenever a message is rejected by
+the moderation gate.
 
 Observability-related environment variables:
 
@@ -588,6 +603,8 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `RETRIEVAL_MIN_SCORE`: minimum similarity score required before a chunk is used
 - `RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT`: per-document cap applied after ranking
 - `RETRIEVAL_CANDIDATE_LIMIT`: number of ranked candidates fetched before filtering and dedupe
+- `RETRIEVAL_RERANK_ENABLED`: rerank the candidate pool with an LLM call before
+  final selection; off by default (adds one extra LLM call per retrieval)
 - `TOOL_MAX_ROUNDS`: maximum provider rounds allowed for tool execution
 - `TOOL_EXECUTION_TIMEOUT_SECONDS`: timeout applied to one tool execution
 - `TOOL_SEARCH_TOP_K`: default top-k used by the knowledge-base search tool
@@ -596,6 +613,10 @@ You can relax them with `--min-rag-document-hit-rate`,
   request rate limiting middleware
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`: request budget per rolling 60-second window
   when rate limiting is enabled
+- `MODERATION_ENABLED`: check each `POST /chat` message against the OpenAI
+  Moderation API before it reaches the workflow; off by default
+- `MODERATION_MODEL`: moderation model used when `MODERATION_ENABLED=true`,
+  defaults to `omni-moderation-latest`
 - `MEMORY_ENABLED`: enables short-term and long-term memory nodes in the workflow
 - `MEMORY_RECENT_MESSAGE_WINDOW`: number of newest raw messages kept outside the rolling summary
 - `MEMORY_SUMMARY_TRIGGER_MESSAGES`: unsummarized message count required before refreshing the rolling summary

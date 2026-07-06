@@ -17,6 +17,7 @@ from chatbot_api.main import (
     get_authenticated_user,
     get_chat_provider,
     get_chat_service,
+    get_optional_moderation_provider,
 )
 from chatbot_api.observability import configure_json_logger
 from chatbot_api.providers import (
@@ -140,6 +141,42 @@ class StubAuthRepository:
 def build_auth_repository_override(repository: StubAuthRepository):
     async def override() -> StubAuthRepository:
         return repository
+
+    return override
+
+
+class StubModerationResult:
+    def __init__(self, *, flagged: bool) -> None:
+        self.flagged = flagged
+
+
+class StubModerationResponse:
+    def __init__(self, *, flagged: bool) -> None:
+        self.results = [StubModerationResult(flagged=flagged)]
+
+
+class StubModerationClient:
+    def __init__(self, *, flagged: bool) -> None:
+        self._flagged = flagged
+        self.calls: list[dict[str, Any]] = []
+        self.moderations = self
+
+    async def create(self, *, input: str, model: str) -> StubModerationResponse:
+        self.calls.append({"input": input, "model": model})
+        return StubModerationResponse(flagged=self._flagged)
+
+
+class StubProviderWithModeration:
+    def __init__(self, raw_client: StubModerationClient) -> None:
+        self.raw_client = raw_client
+
+    async def generate_response(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+        raise AssertionError("generate_response should not be called in moderation tests")
+
+
+def build_chat_provider_override(provider: StubProviderWithModeration):
+    async def override():
+        return provider
 
     return override
 
@@ -582,6 +619,99 @@ async def test_chat_rejects_invalid_api_key_when_auth_is_enabled(
     logged_event = find_log_event(audit_log_handler, "auth.failed")
     assert logged_event["reason"] == "invalid_api_key"
     assert "api_key_prefix" in logged_event
+
+
+@pytest.mark.anyio
+async def test_chat_blocked_by_moderation_returns_400_and_skips_workflow(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    service = StubChatService(
+        completion=ChatCompletion(content="unused", provider="openai", model="gpt-4.1-mini")
+    )
+    moderation_client = StubModerationClient(flagged=True)
+    app.dependency_overrides[get_chat_service] = build_chat_service_override(service)
+    app.dependency_overrides[get_optional_moderation_provider] = build_chat_provider_override(
+        StubProviderWithModeration(moderation_client)
+    )
+    app.dependency_overrides[get_settings] = build_settings_override(
+        Settings(moderation_enabled=True)
+    )
+
+    response = await async_client.post("/chat", json={"message": "disallowed content"})
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert service.chat_calls == []
+    assert moderation_client.calls == [
+        {"input": "disallowed content", "model": "omni-moderation-latest"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_chat_allowed_by_moderation_proceeds_to_workflow(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    service = StubChatService(
+        completion=ChatCompletion(content="Hello", provider="openai", model="gpt-4.1-mini")
+    )
+    moderation_client = StubModerationClient(flagged=False)
+    app.dependency_overrides[get_chat_service] = build_chat_service_override(service)
+    app.dependency_overrides[get_optional_moderation_provider] = build_chat_provider_override(
+        StubProviderWithModeration(moderation_client)
+    )
+    app.dependency_overrides[get_settings] = build_settings_override(
+        Settings(moderation_enabled=True)
+    )
+
+    response = await async_client.post("/chat", json={"message": "hello there"})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert len(service.chat_calls) == 1
+    assert moderation_client.calls == [{"input": "hello there", "model": "omni-moderation-latest"}]
+
+
+@pytest.mark.anyio
+async def test_chat_stream_blocked_by_moderation_returns_400(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    service = StubChatService()
+    moderation_client = StubModerationClient(flagged=True)
+    app.dependency_overrides[get_chat_service] = build_chat_service_override(service)
+    app.dependency_overrides[get_optional_moderation_provider] = build_chat_provider_override(
+        StubProviderWithModeration(moderation_client)
+    )
+    app.dependency_overrides[get_settings] = build_settings_override(
+        Settings(moderation_enabled=True)
+    )
+
+    response = await async_client.post(
+        "/chat", json={"message": "disallowed content", "stream": True}
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert service.stream_calls == []
+
+
+@pytest.mark.anyio
+async def test_chat_moderation_disabled_by_default_skips_check(
+    async_client: AsyncClient,
+    clear_dependency_overrides: None,
+) -> None:
+    service = StubChatService(
+        completion=ChatCompletion(content="Hello", provider="openai", model="gpt-4.1-mini")
+    )
+    moderation_client = StubModerationClient(flagged=True)
+    app.dependency_overrides[get_chat_service] = build_chat_service_override(service)
+    app.dependency_overrides[get_optional_moderation_provider] = build_chat_provider_override(
+        StubProviderWithModeration(moderation_client)
+    )
+
+    response = await async_client.post("/chat", json={"message": "hello there"})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert moderation_client.calls == []
 
 
 @pytest.mark.anyio

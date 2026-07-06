@@ -33,12 +33,15 @@ class Settings(BaseModel):
     retrieval_min_score: float = 0.35
     retrieval_max_chunks_per_document: int = 1
     retrieval_candidate_limit: int = 12
+    retrieval_rerank_enabled: bool = False
     tool_max_rounds: int = 4
     tool_execution_timeout_seconds: float = 15.0
     tool_search_top_k: int = 3
     auth_enabled: bool = False
     rate_limit_enabled: bool = False
     rate_limit_requests_per_minute: int = 60
+    moderation_enabled: bool = False
+    moderation_model: str = "omni-moderation-latest"
     memory_enabled: bool = True
     memory_recent_message_window: int = 6
     memory_summary_trigger_messages: int = 12
@@ -136,6 +139,7 @@ def get_settings() -> Settings:
             os.getenv("RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT", "1")
         ),
         retrieval_candidate_limit=int(os.getenv("RETRIEVAL_CANDIDATE_LIMIT", "12")),
+        retrieval_rerank_enabled=parse_bool_env("RETRIEVAL_RERANK_ENABLED", False),
         tool_max_rounds=int(os.getenv("TOOL_MAX_ROUNDS", "4")),
         tool_execution_timeout_seconds=float(
             os.getenv("TOOL_EXECUTION_TIMEOUT_SECONDS", "15")
@@ -146,6 +150,8 @@ def get_settings() -> Settings:
         rate_limit_requests_per_minute=int(
             os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60")
         ),
+        moderation_enabled=parse_bool_env("MODERATION_ENABLED", False),
+        moderation_model=os.getenv("MODERATION_MODEL", "omni-moderation-latest"),
         memory_enabled=parse_bool_env("MEMORY_ENABLED", True),
         memory_recent_message_window=int(os.getenv("MEMORY_RECENT_MESSAGE_WINDOW", "6")),
         memory_summary_trigger_messages=int(

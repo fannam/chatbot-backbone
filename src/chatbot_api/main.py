@@ -24,6 +24,7 @@ from chatbot_api.database import create_database_engine, create_session_factory
 from chatbot_api.document_ingestion import (
     DefaultDocumentTextExtractor,
     DocumentContentError,
+    DocumentDuplicateError,
     DocumentIngestionService,
     DocumentTextExtractor,
     DocumentTooLargeError,
@@ -57,6 +58,7 @@ from chatbot_api.providers import (
     TokenUsage,
     ToolRun,
     UsageCost,
+    check_message_moderation,
 )
 from chatbot_api.repositories import (
     ChatRepository,
@@ -444,12 +446,35 @@ def create_app() -> FastAPI:
         request: ChatRequest,
         raw_request: Request,
         service: ChatService = Depends(get_chat_service),
+        moderation_provider: ChatProvider | None = Depends(get_optional_moderation_provider),
+        settings: Settings = Depends(get_settings),
         observability: ObservabilityService = Depends(get_observability),
         trace_sink: TraceSink = Depends(get_trace_sink),
         authenticated_user: AuthenticatedUser | None = Depends(get_authenticated_user),
     ) -> ChatResponse | EventSourceResponse:
         context_token = bind_request_context(request_id=raw_request.state.request_id)
         try:
+            if settings.moderation_enabled:
+                raw_client = getattr(moderation_provider, "raw_client", None)
+                if raw_client is None:
+                    raise HTTPException(
+                        status_code=503, detail="moderation check unavailable"
+                    )
+                flagged = await check_message_moderation(
+                    raw_client, request.message, model=settings.moderation_model
+                )
+                if flagged:
+                    observability.record_moderation_check(outcome="blocked")
+                    observability.log_event(
+                        "moderation.blocked",
+                        level="warning",
+                        message_chars=len(request.message),
+                    )
+                    raise HTTPException(
+                        status_code=400, detail="message violates content policy"
+                    )
+                observability.record_moderation_check(outcome="allowed")
+
             effective_metadata = merge_request_metadata_with_authenticated_user(
                 request.metadata,
                 authenticated_user,
@@ -751,6 +776,19 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="failed to enqueue document embedding task",
                 ) from exc
+        except DocumentDuplicateError as exc:
+            observability.record_document_upload(outcome="duplicate")
+            observability.log_event(
+                "document.upload.rejected",
+                level="warning",
+                filename=file.filename or "upload",
+                owner_user_id=owner_user_id,
+                duration_ms=(perf_counter() - started_at) * 1000,
+                outcome="duplicate",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedDocumentTypeError as exc:
             observability.record_document_upload(outcome="validation_error")
             observability.log_event(
@@ -1002,6 +1040,16 @@ async def get_chat_provider(
     return chat_provider
 
 
+async def get_optional_moderation_provider(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    trace_sink: TraceSink = Depends(get_trace_sink),
+) -> ChatProvider | None:
+    if not settings.moderation_enabled:
+        return None
+    return await get_chat_provider(request, settings=settings, trace_sink=trace_sink)
+
+
 async def get_embedding_provider(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -1132,12 +1180,23 @@ async def get_document_task_queue() -> DocumentTaskQueue:
     return CeleryDocumentTaskQueue()
 
 
+async def get_optional_rerank_provider(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    trace_sink: TraceSink = Depends(get_trace_sink),
+) -> ChatProvider | None:
+    if not settings.retrieval_rerank_enabled:
+        return None
+    return await get_chat_provider(request, settings=settings, trace_sink=trace_sink)
+
+
 async def get_document_retriever(
     repository: SqlAlchemyDocumentRepository = Depends(get_document_repository),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     settings: Settings = Depends(get_settings),
     observability: ObservabilityService = Depends(get_observability),
     trace_sink: TraceSink = Depends(get_trace_sink),
+    rerank_provider: ChatProvider | None = Depends(get_optional_rerank_provider),
 ) -> DocumentRetriever:
     return DocumentRetriever(
         repository,
@@ -1148,6 +1207,8 @@ async def get_document_retriever(
         candidate_limit=settings.retrieval_candidate_limit,
         observability=observability,
         trace_sink=trace_sink,
+        chat_provider=rerank_provider,
+        rerank_enabled=settings.retrieval_rerank_enabled,
     )
 
 
