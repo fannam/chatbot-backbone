@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import chatbot_api.eval_suite as eval_suite_module
 from chatbot_api.database import create_database_engine, create_session_factory
 from chatbot_api.document_ingestion import DocumentChunkCreate
 from chatbot_api.eval_suite import exit_code_for_report, run_eval_suite
@@ -289,6 +290,96 @@ async def test_run_eval_suite_writes_all_reports_on_success(tmp_path: Path) -> N
     assert (output_dir / "chat-eval-report.json").exists()
     assert (output_dir / "memory-eval-report.json").exists()
     assert (output_dir / "eval-suite-report.json").exists()
+
+
+@pytest.mark.anyio
+async def test_run_eval_suite_parses_each_dataset_once_and_shares_one_embedding_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "shared.db"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+    rag_dataset_path = tmp_path / "rag.json"
+    chat_dataset_path = tmp_path / "chat.json"
+    memory_dataset_path = tmp_path / "memory.json"
+    output_dir = tmp_path / "artifacts-shared"
+
+    write_dataset(rag_dataset_path, build_rag_dataset())
+    write_dataset(
+        chat_dataset_path,
+        build_chat_dataset(
+            answer_text="The guide says hello.",
+            expected_answer_substring="hello",
+        ),
+    )
+    write_dataset(
+        memory_dataset_path,
+        build_memory_dataset(
+            answer_text="I will call you Alice.",
+            expected_answer_substring="Alice",
+        ),
+    )
+
+    load_rag_calls: list[str] = []
+    real_load_rag = eval_suite_module.load_retrieval_eval_dataset
+
+    def spy_load_rag(path):
+        load_rag_calls.append(str(path))
+        return real_load_rag(path)
+
+    monkeypatch.setattr(eval_suite_module, "load_retrieval_eval_dataset", spy_load_rag)
+
+    construction_count = 0
+    close_count = 0
+
+    class SpyEmbeddingProvider:
+        def __init__(self, settings) -> None:
+            nonlocal construction_count
+            construction_count += 1
+
+        async def embed_texts(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+        async def aclose(self) -> None:
+            nonlocal close_count
+            close_count += 1
+
+    monkeypatch.setattr(eval_suite_module, "OpenAIEmbeddingProvider", SpyEmbeddingProvider)
+
+    engine = create_database_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        await seed_document(
+            database_url=database_url,
+            document_id="doc-guide",
+            filename="guide.md",
+            status="ready",
+            embedding=[1.0, 0.0],
+        )
+
+        report = await run_eval_suite(
+            rag_dataset_path=rag_dataset_path,
+            chat_dataset_path=chat_dataset_path,
+            memory_dataset_path=memory_dataset_path,
+            output_dir=output_dir,
+            settings=Settings(
+                database_url=database_url,
+                langgraph_checkpoint_database_url=None,
+                retrieval_top_k=1,
+                retrieval_min_score=0.3,
+                retrieval_max_chunks_per_document=1,
+                retrieval_candidate_limit=2,
+                tool_search_top_k=1,
+            ),
+        )
+    finally:
+        await engine.dispose()
+
+    assert report.passed is True
+    assert load_rag_calls == [str(rag_dataset_path)]
+    assert construction_count == 1
+    assert close_count == 1
 
 
 @pytest.mark.anyio

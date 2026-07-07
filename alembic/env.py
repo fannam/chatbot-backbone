@@ -12,7 +12,13 @@ from chatbot_api.database import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers defaults to True, which would silently disable
+    # every already-created logger not listed in alembic.ini's [loggers]
+    # section (e.g. "chatbot_api") for the rest of the process -- this bit
+    # both the running API process (if migrations were ever run in-process)
+    # and this repo's own test suite (test_migrations.py runs real Alembic
+    # migrations, which broke logging-dependent assertions in later tests).
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

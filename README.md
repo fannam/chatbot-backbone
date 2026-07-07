@@ -363,6 +363,7 @@ Observability-related environment variables:
 
 ```bash
 OBSERVABILITY_JSON_LOGS=true
+OBSERVABILITY_LOG_LEVEL=info
 OBSERVABILITY_METRICS_ENABLED=true
 OBSERVABILITY_INCLUDE_REQUEST_METADATA=false
 LANGSMITH_TRACING=false
@@ -373,6 +374,11 @@ OPENAI_MODEL_INPUT_PRICE_PER_1M_TOKENS=0.40
 OPENAI_MODEL_OUTPUT_PRICE_PER_1M_TOKENS=1.60
 ```
 
+Despite the name, `OBSERVABILITY_JSON_LOGS` is a full logging kill-switch, not
+a JSON-vs-plain-text format toggle — there is no alternate plain-text
+formatter, so setting it to `false` disables all structured logging entirely
+(metrics/tracing are unaffected). `OBSERVABILITY_LOG_LEVEL` controls the
+minimum level actually emitted (`debug`/`info`/`warning`/`error`).
 `OBSERVABILITY_INCLUDE_REQUEST_METADATA` stays off by default to avoid logging
 arbitrary caller metadata. If pricing env vars are blank, the API still reports
 token usage but omits estimated cost.
@@ -650,7 +656,10 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `DOCUMENT_CHUNK_SIZE_CHARS`: target chunk size for stored document chunks
 - `DOCUMENT_CHUNK_OVERLAP_CHARS`: overlap between adjacent stored document chunks
 - `DOCUMENT_EMBEDDING_DIMENSIONS`: embedding vector size for stored chunks
-- `DOCUMENT_EMBEDDING_BATCH_SIZE`: chunk batch size used by the embedding worker and reindex scan
+- `DOCUMENT_EMBEDDING_BATCH_SIZE`: number of chunks fetched and embedded per
+  embedding-provider call in the embedding worker
+- `DOCUMENT_REINDEX_PAGE_SIZE`: number of documents fetched per DB page when
+  scanning for documents missing embeddings (`reindex_embeddings.py`)
 - `DOCUMENT_EMBEDDING_TASK_MAX_RETRIES`: maximum Celery retries for temporary embedding failures
 - `DOCUMENT_EMBEDDING_TASK_RETRY_BACKOFF_SECONDS`: base exponential backoff for embedding retries
 - `RETRIEVAL_TOP_K`: number of retrieved chunks injected into chat
@@ -662,6 +671,8 @@ You can relax them with `--min-rag-document-hit-rate`,
 - `TOOL_MAX_ROUNDS`: maximum provider rounds allowed for tool execution
 - `TOOL_EXECUTION_TIMEOUT_SECONDS`: timeout applied to one tool execution
 - `TOOL_SEARCH_TOP_K`: default top-k used by the knowledge-base search tool
+- `TOOL_SEARCH_MAX_TOP_K`: upper bound the knowledge-base search tool clamps a
+  caller-supplied `top_k` to
 - `AUTH_ENABLED`: require `X-API-Key` for stateful API endpoints
 - `RATE_LIMIT_ENABLED`: enable per-API-key (or per-IP when unauthenticated)
   request rate limiting middleware

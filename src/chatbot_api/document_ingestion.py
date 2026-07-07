@@ -179,6 +179,9 @@ class TextChunker:
         self._chunk_overlap = chunk_overlap
 
     def chunk_text(self, text: str) -> list[TextChunk]:
+        # Re-normalizing here is an idempotent no-op for text that already
+        # went through the extractor, but chunk_text is a public method not
+        # guaranteed to only ever receive extractor output.
         normalized = normalize_document_text(text)
         if not normalized:
             return []

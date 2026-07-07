@@ -1291,6 +1291,10 @@ async def get_chat_workflow(
 ) -> ChatWorkflow:
     runtime = getattr(request.app.state, "chat_workflow_runtime", None)
     if runtime is None:
+        # Unreachable in production (lifespan() always sets this before
+        # `yield`), but tests build the app via ASGITransport, which never
+        # invokes lifespan -- this fallback is what makes /chat work in tests
+        # that don't override get_chat_service/get_chat_workflow themselves.
         runtime = ChatWorkflowRuntime(settings)
         request.app.state.chat_workflow_runtime = runtime
 
@@ -1306,6 +1310,7 @@ async def get_tool_registry(
     return build_tool_registry(
         retriever=retriever,
         search_top_k=settings.tool_search_top_k,
+        search_max_top_k=settings.tool_search_max_top_k,
         timeout_seconds=settings.tool_execution_timeout_seconds,
         observability=observability,
         trace_sink=trace_sink,

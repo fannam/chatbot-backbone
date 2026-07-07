@@ -62,6 +62,27 @@ class UsageCost:
     currency: Literal["USD"] = "USD"
 
 
+def deserialize_usage(data: Any) -> TokenUsage | None:
+    if not isinstance(data, dict):
+        return None
+    return TokenUsage(
+        input_tokens=int(data["input_tokens"]),
+        output_tokens=int(data["output_tokens"]),
+        total_tokens=int(data["total_tokens"]),
+    )
+
+
+def deserialize_cost(data: Any) -> UsageCost | None:
+    if not isinstance(data, dict):
+        return None
+    return UsageCost(
+        input_cost_usd=float(data["input_cost_usd"]),
+        output_cost_usd=float(data["output_cost_usd"]),
+        total_cost_usd=float(data["total_cost_usd"]),
+        currency=str(data["currency"]),
+    )
+
+
 @dataclass(frozen=True)
 class ChatCompletionMetadata:
     citations: list[ChatCitation] = field(default_factory=list)

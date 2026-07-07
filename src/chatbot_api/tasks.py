@@ -6,9 +6,10 @@ from time import perf_counter
 
 from celery import Task
 from celery.exceptions import MaxRetriesExceededError, Retry
+from sqlalchemy.exc import DBAPIError
 
 from chatbot_api.celery_app import celery_app
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.document_embeddings import DocumentEmbeddingService
 from chatbot_api.embeddings import (
     EmbeddingProviderError,
@@ -22,44 +23,38 @@ from chatbot_api.settings import get_settings
 
 async def run_embed_document(document_id: str) -> dict[str, str | int] | None:
     settings = get_settings()
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
     embedding_provider = OpenAIEmbeddingProvider(settings)
     try:
-        async with session_factory() as session:
-            repository = SqlAlchemyDocumentRepository(session)
-            service = DocumentEmbeddingService(
-                repository,
-                embedding_provider,
-                batch_size=settings.document_embedding_batch_size,
-            )
-            result = await service.embed_document(document_id)
-            if result is None:
-                return None
+        async with session_scope(settings.database_url) as session_factory:
+            async with session_factory() as session:
+                repository = SqlAlchemyDocumentRepository(session)
+                service = DocumentEmbeddingService(
+                    repository,
+                    embedding_provider,
+                    batch_size=settings.document_embedding_batch_size,
+                )
+                result = await service.embed_document(document_id)
+                if result is None:
+                    return None
 
-            return {
-                "document_id": result.document_id,
-                "status": result.status,
-                "updated_chunks": result.updated_chunks,
-            }
+                return {
+                    "document_id": result.document_id,
+                    "status": result.status,
+                    "updated_chunks": result.updated_chunks,
+                }
     finally:
         await embedding_provider.aclose()
-        await engine.dispose()
 
 
 async def mark_document_failed(document_id: str, failure_reason: str) -> None:
     settings = get_settings()
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         async with session_factory() as session:
             repository = SqlAlchemyDocumentRepository(session)
             await repository.mark_document_failed(
                 document_id=document_id,
                 failure_reason=failure_reason,
             )
-    finally:
-        await engine.dispose()
 
 
 def calculate_retry_countdown(*, backoff_seconds: int, retry_count: int) -> int:
@@ -86,7 +81,7 @@ def execute_embed_document_task(
 
     try:
         result = asyncio.run(run_job(document_id))
-    except (EmbeddingProviderTimeoutError, EmbeddingProviderError) as exc:
+    except (EmbeddingProviderTimeoutError, EmbeddingProviderError, DBAPIError) as exc:
         countdown = calculate_retry_countdown(
             backoff_seconds=resolved_settings.document_embedding_task_retry_backoff_seconds,
             retry_count=retry_count,

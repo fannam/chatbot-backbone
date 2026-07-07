@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.eval_common import is_deep_subset, safe_ratio, seed_history, write_report
 from chatbot_api.memory import MemoryManager, extract_user_id
 from chatbot_api.providers import ChatCompletion, ChatProvider, ChatTurn, ToolCallBatch
@@ -413,11 +413,9 @@ async def evaluate_memory_dataset(
     *,
     settings: Settings,
 ) -> list[MemoryEvalCaseReport]:
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
     reports: list[MemoryEvalCaseReport] = []
 
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         for case in cases:
             reports.append(
                 await evaluate_memory_case(
@@ -426,8 +424,6 @@ async def evaluate_memory_dataset(
                     settings=settings,
                 )
             )
-    finally:
-        await engine.dispose()
 
     return reports
 
@@ -843,13 +839,14 @@ async def run_memory_eval(
     dataset_path: str | Path = DEFAULT_DATASET_PATH,
     output_path: str | Path | None = None,
     settings: Settings | None = None,
+    dataset: MemoryEvalDataset | None = None,
 ) -> MemoryEvalReport:
     resolved_settings = settings or get_settings()
-    dataset = load_memory_eval_dataset(dataset_path)
-    case_reports = await evaluate_memory_dataset(dataset.cases, settings=resolved_settings)
+    resolved_dataset = dataset or load_memory_eval_dataset(dataset_path)
+    case_reports = await evaluate_memory_dataset(resolved_dataset.cases, settings=resolved_settings)
     report = build_report(
         dataset_path=dataset_path,
-        dataset=dataset,
+        dataset=resolved_dataset,
         case_reports=case_reports,
     )
     if output_path is not None:

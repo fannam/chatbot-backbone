@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from pydantic import BaseModel
 
@@ -133,6 +135,34 @@ async def test_tool_registry_executes_search_tool_and_collects_citations() -> No
         ]
     }
     assert [citation.document_id for citation in result.citations] == ["doc-1", "doc-2"]
+
+
+@pytest.mark.anyio
+async def test_tool_registry_allows_caller_top_k_up_to_configured_max() -> None:
+    retriever = StubRetriever(
+        [make_chunk(document_id="doc-1", chunk_index=0, content="Guide snippet", score=0.91)]
+    )
+    registry = build_tool_registry(
+        retriever=retriever,  # type: ignore[arg-type]
+        search_top_k=2,
+        search_max_top_k=5,
+        timeout_seconds=5.0,
+    )
+
+    await registry.execute(
+        ToolCallRequest(
+            call_id="tool-1",
+            name="search_knowledge_base",
+            arguments={"query": "guide", "top_k": 5},
+        ),
+        context=ToolExecutionContext(
+            conversation_id="conv-search",
+            owner_user_id=None,
+            request_metadata={"source": "unit-test"},
+        ),
+    )
+
+    assert retriever.calls == [("guide", 5, 5, None)]
 
 
 @pytest.mark.anyio
@@ -270,29 +300,45 @@ async def test_tool_registry_returns_profile_not_found_when_metadata_is_missing(
 
 @pytest.mark.anyio
 async def test_tool_registry_returns_profile_not_found_when_metadata_is_malformed() -> None:
-    registry = build_tool_registry(
-        retriever=StubRetriever([]),  # type: ignore[arg-type]
-        search_top_k=3,
-        timeout_seconds=5.0,
-    )
+    # `configure_json_logger()` sets propagate=False on the "chatbot_api" logger
+    # the first time it runs anywhere in the process, which breaks pytest's
+    # caplog (it relies on propagation to the root logger) depending on test
+    # order -- attach a handler directly instead, same convention used by
+    # tests/test_chat.py's audit_log_handler fixture.
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append  # type: ignore[method-assign]
+    logger = logging.getLogger("chatbot_api")
+    logger.addHandler(handler)
+    try:
+        registry = build_tool_registry(
+            retriever=StubRetriever([]),  # type: ignore[arg-type]
+            search_top_k=3,
+            timeout_seconds=5.0,
+        )
 
-    result = await registry.execute(
-        ToolCallRequest(
-            call_id="tool-profile-malformed",
-            name="get_current_user_profile",
-            arguments={},
-        ),
-        context=ToolExecutionContext(
-            conversation_id="conv-profile-malformed",
-            owner_user_id=None,
-            request_metadata={
-                "user_profile": {
-                    "display_name": "Missing user id",
-                    "preferences": [],
-                }
-            },
-        ),
-    )
+        result = await registry.execute(
+            ToolCallRequest(
+                call_id="tool-profile-malformed",
+                name="get_current_user_profile",
+                arguments={},
+            ),
+            context=ToolExecutionContext(
+                conversation_id="conv-profile-malformed",
+                owner_user_id=None,
+                request_metadata={
+                    "user_profile": {
+                        "display_name": "Missing user id",
+                        "preferences": [],
+                    }
+                },
+            ),
+        )
+    finally:
+        logger.removeHandler(handler)
 
     assert result.tool_run.status == "completed"
     assert result.tool_run.output == {"found": False, "profile": None}
+    assert any(
+        "malformed user_profile metadata ignored" in record.getMessage() for record in records
+    )

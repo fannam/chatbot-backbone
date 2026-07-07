@@ -13,9 +13,9 @@ from chatbot_api.providers import (
     ChatCompletion,
     ChatCompletionMetadata,
     ChatProvider,
-    TokenUsage,
     ToolRun,
-    UsageCost,
+    deserialize_cost,
+    deserialize_usage,
 )
 from chatbot_api.repositories import ChatRepository
 from chatbot_api.tools import ToolRegistry
@@ -247,25 +247,4 @@ def deserialize_completion_metadata(
         ],
         usage=deserialize_usage(usage),
         cost=deserialize_cost(cost),
-    )
-
-
-def deserialize_usage(metadata: Any) -> TokenUsage | None:
-    if not isinstance(metadata, dict):
-        return None
-    return TokenUsage(
-        input_tokens=int(metadata["input_tokens"]),
-        output_tokens=int(metadata["output_tokens"]),
-        total_tokens=int(metadata["total_tokens"]),
-    )
-
-
-def deserialize_cost(metadata: Any) -> UsageCost | None:
-    if not isinstance(metadata, dict):
-        return None
-    return UsageCost(
-        input_cost_usd=float(metadata["input_cost_usd"]),
-        output_cost_usd=float(metadata["output_cost_usd"]),
-        total_cost_usd=float(metadata["total_cost_usd"]),
-        currency=str(metadata["currency"]),
     )

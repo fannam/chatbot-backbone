@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.repositories import SqlAlchemyAuthRepository
 from chatbot_api.settings import get_settings
 
@@ -29,9 +29,7 @@ async def run() -> None:
         raise ValueError("--preferences-json must decode to a JSON object")
 
     settings = get_settings()
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         async with session_factory() as session:
             repository = SqlAlchemyAuthRepository(session)
             user = await repository.upsert_user(
@@ -43,8 +41,6 @@ async def run() -> None:
                 preferences_json=preferences,
             )
             created = await repository.create_api_key(user_id=user.id, name=args.name)
-    finally:
-        await engine.dispose()
 
     print(f"user_id={created.user.id}")
     print(f"api_key_name={args.name}")

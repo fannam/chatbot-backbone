@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from operator import add, floordiv, mod, mul, pow, sub, truediv
@@ -116,6 +117,43 @@ class RegisteredTool:
         )
 
 
+def _serialize_tool_output(
+    status: ToolStatus,
+    *,
+    output: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> str:
+    payload: dict[str, Any] = {"status": status}
+    if output is not None:
+        payload["result"] = output
+    if error is not None:
+        payload["error"] = error
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _build_tool_execution_result(
+    tool_call: ToolCallRequest,
+    *,
+    status: ToolStatus,
+    input: dict[str, Any],
+    output: dict[str, Any] | None = None,
+    error: str | None = None,
+    citations: list[ChatCitation] | None = None,
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_run=ToolRun(
+            tool_call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            status=status,
+            input=input,
+            output=output,
+            error=error,
+        ),
+        model_output=_serialize_tool_output(status, output=output, error=error),
+        citations=citations or [],
+    )
+
+
 class ToolRegistry:
     def __init__(
         self,
@@ -209,20 +247,11 @@ class ToolRegistry:
             citations = extract_tool_citations(output)
             output_payload = output.model_dump(mode="json")
         except TimeoutError:
-            result = ToolExecutionResult(
-                tool_run=ToolRun(
-                    tool_call_id=tool_call.call_id,
-                    tool_name=tool_call.name,
-                    status="timed_out",
-                    input=validated_input.model_dump(mode="json"),
-                    error="tool execution timed out",
-                ),
-                model_output=json.dumps(
-                    {"status": "timed_out", "error": "tool execution timed out"},
-                    ensure_ascii=True,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+            result = _build_tool_execution_result(
+                tool_call,
+                status="timed_out",
+                input=validated_input.model_dump(mode="json"),
+                error="tool execution timed out",
             )
             self._record_tool_execution(result, duration_seconds=perf_counter() - started_at)
             trace_span.finish_success(
@@ -235,20 +264,11 @@ class ToolRegistry:
             )
             return result
         except Exception as exc:
-            result = ToolExecutionResult(
-                tool_run=ToolRun(
-                    tool_call_id=tool_call.call_id,
-                    tool_name=tool_call.name,
-                    status="failed",
-                    input=validated_input.model_dump(mode="json"),
-                    error=str(exc),
-                ),
-                model_output=json.dumps(
-                    {"status": "failed", "error": str(exc)},
-                    ensure_ascii=True,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+            result = _build_tool_execution_result(
+                tool_call,
+                status="failed",
+                input=validated_input.model_dump(mode="json"),
+                error=str(exc),
             )
             self._record_tool_execution(result, duration_seconds=perf_counter() - started_at)
             trace_span.finish_success(
@@ -261,20 +281,11 @@ class ToolRegistry:
             )
             return result
         else:
-            result = ToolExecutionResult(
-                tool_run=ToolRun(
-                    tool_call_id=tool_call.call_id,
-                    tool_name=tool_call.name,
-                    status="completed",
-                    input=validated_input.model_dump(mode="json"),
-                    output=output_payload,
-                ),
-                model_output=json.dumps(
-                    {"status": "completed", "result": output_payload},
-                    ensure_ascii=True,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
+            result = _build_tool_execution_result(
+                tool_call,
+                status="completed",
+                input=validated_input.model_dump(mode="json"),
+                output=output_payload,
                 citations=citations,
             )
             self._record_tool_execution(result, duration_seconds=perf_counter() - started_at)
@@ -294,20 +305,11 @@ class ToolRegistry:
         tool_call: ToolCallRequest,
         error_message: str,
     ) -> ToolExecutionResult:
-        return ToolExecutionResult(
-            tool_run=ToolRun(
-                tool_call_id=tool_call.call_id,
-                tool_name=tool_call.name,
-                status="rejected",
-                input=dict(tool_call.arguments),
-                error=error_message,
-            ),
-            model_output=json.dumps(
-                {"status": "rejected", "error": error_message},
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+        return _build_tool_execution_result(
+            tool_call,
+            status="rejected",
+            input=dict(tool_call.arguments),
+            error=error_message,
         )
 
     def _record_tool_execution(
@@ -339,6 +341,7 @@ def build_tool_registry(
     *,
     retriever: DocumentRetriever,
     search_top_k: int,
+    search_max_top_k: int | None = None,
     timeout_seconds: float,
     observability: ObservabilityService | None = None,
     trace_sink: TraceSink | None = None,
@@ -346,7 +349,7 @@ def build_tool_registry(
     kb_tool = KnowledgeBaseSearchTool(
         retriever=retriever,
         default_top_k=search_top_k,
-        max_top_k=search_top_k,
+        max_top_k=search_max_top_k if search_max_top_k is not None else search_top_k,
     )
     return ToolRegistry(
         [
@@ -407,7 +410,10 @@ async def run_get_current_user_profile_tool(
 
     try:
         profile = CurrentUserProfilePayload.model_validate(raw_profile)
-    except ValidationError:
+    except ValidationError as exc:
+        logging.getLogger("chatbot_api").warning(
+            "malformed user_profile metadata ignored: %s", exc
+        )
         return CurrentUserProfileToolOutput(found=False, profile=None)
 
     return CurrentUserProfileToolOutput(found=True, profile=profile)

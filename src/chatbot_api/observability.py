@@ -37,7 +37,7 @@ def get_request_id() -> str | None:
     return _REQUEST_CONTEXT.get({}).get("request_id")
 
 
-def configure_json_logger() -> logging.Logger:
+def configure_json_logger(level: LogLevel = "info") -> logging.Logger:
     global _LOGGER_CONFIGURED
 
     if _LOGGER_CONFIGURED:
@@ -47,7 +47,7 @@ def configure_json_logger() -> logging.Logger:
     handler.setFormatter(JsonLogFormatter())
     _LOGGER.handlers.clear()
     _LOGGER.addHandler(handler)
-    _LOGGER.setLevel(logging.INFO)
+    _LOGGER.setLevel(resolve_log_level(level))
     _LOGGER.propagate = False
     _LOGGER_CONFIGURED = True
     return _LOGGER
@@ -199,7 +199,7 @@ class ObservabilityService:
         self._json_logs_enabled = resolved_settings.observability_json_logs
         self._metrics_enabled = resolved_settings.observability_metrics_enabled
         self._include_request_metadata = resolved_settings.observability_include_request_metadata
-        self._logger = configure_json_logger()
+        self._logger = configure_json_logger(resolved_settings.observability_log_level)
         self._metrics = MetricsRegistry(build_metric_definitions())
 
     @property

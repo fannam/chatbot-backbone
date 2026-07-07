@@ -19,7 +19,8 @@ from chatbot_api.chat_eval import (
     load_chat_eval_dataset,
     run_chat_eval,
 )
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
+from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.eval_common import unique_preserving_order, write_report
 from chatbot_api.memory_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_MEMORY_DATASET_PATH,
@@ -162,9 +163,7 @@ async def preflight_corpus(
             passed=True,
         )
 
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         async with session_factory() as session:
             result = await session.execute(
                 select(Document.filename, Document.status).where(
@@ -174,8 +173,6 @@ async def preflight_corpus(
             statuses_by_filename: dict[str, list[str]] = defaultdict(list)
             for row in result.all():
                 statuses_by_filename[str(row.filename)].append(str(row.status))
-    finally:
-        await engine.dispose()
 
     files: list[CorpusPreflightFileStatus] = []
     missing_filenames: list[str] = []
@@ -269,12 +266,12 @@ async def run_eval_suite(
     min_chat_pass_rate: float = 1.0,
     min_memory_pass_rate: float = 1.0,
     settings: Settings | None = None,
-    embedding_provider=None,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> EvalSuiteReport:
     resolved_settings = settings or get_settings()
     rag_dataset = load_retrieval_eval_dataset(rag_dataset_path)
     chat_dataset = load_chat_eval_dataset(chat_dataset_path)
-    load_memory_eval_dataset(memory_dataset_path)
+    memory_dataset = load_memory_eval_dataset(memory_dataset_path)
     resolved_output_dir = Path(output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -295,29 +292,38 @@ async def run_eval_suite(
     chat_summary: ChatEvalSummary | None = None
     memory_summary: MemoryEvalSummary | None = None
 
-    if corpus_preflight.passed:
-        rag_report = await run_retrieval_eval(
-            dataset_path=rag_dataset_path,
-            output_path=resolved_output_dir / DEFAULT_RAG_REPORT_FILENAME,
-            settings=resolved_settings,
-            embedding_provider=embedding_provider,
-        )
-        rag_summary = rag_report.summary
+    owns_embedding_provider = embedding_provider is None
+    resolved_embedding_provider = embedding_provider or OpenAIEmbeddingProvider(resolved_settings)
+    try:
+        if corpus_preflight.passed:
+            rag_report = await run_retrieval_eval(
+                dataset_path=rag_dataset_path,
+                output_path=resolved_output_dir / DEFAULT_RAG_REPORT_FILENAME,
+                settings=resolved_settings,
+                embedding_provider=resolved_embedding_provider,
+                dataset=rag_dataset,
+            )
+            rag_summary = rag_report.summary
 
-        chat_report = await run_chat_eval(
-            dataset_path=chat_dataset_path,
-            output_path=resolved_output_dir / DEFAULT_CHAT_REPORT_FILENAME,
-            settings=resolved_settings,
-            embedding_provider=embedding_provider,
-        )
-        chat_summary = chat_report.summary
+            chat_report = await run_chat_eval(
+                dataset_path=chat_dataset_path,
+                output_path=resolved_output_dir / DEFAULT_CHAT_REPORT_FILENAME,
+                settings=resolved_settings,
+                embedding_provider=resolved_embedding_provider,
+                dataset=chat_dataset,
+            )
+            chat_summary = chat_report.summary
 
-        memory_report = await run_memory_eval(
-            dataset_path=memory_dataset_path,
-            output_path=resolved_output_dir / DEFAULT_MEMORY_REPORT_FILENAME,
-            settings=resolved_settings,
-        )
-        memory_summary = memory_report.summary
+            memory_report = await run_memory_eval(
+                dataset_path=memory_dataset_path,
+                output_path=resolved_output_dir / DEFAULT_MEMORY_REPORT_FILENAME,
+                settings=resolved_settings,
+                dataset=memory_dataset,
+            )
+            memory_summary = memory_report.summary
+    finally:
+        if owns_embedding_provider:
+            await resolved_embedding_provider.aclose()
 
     failure_reasons = build_failure_reasons(
         thresholds=thresholds,

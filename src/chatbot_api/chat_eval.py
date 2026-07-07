@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.eval_common import (
     ExpectedSource,
@@ -416,11 +416,9 @@ async def evaluate_chat_dataset(
     settings: Settings,
     embedding_provider: EmbeddingProvider,
 ) -> list[ChatEvalCaseReport]:
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
     reports: list[ChatEvalCaseReport] = []
 
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         for case in cases:
             reports.append(
                 await evaluate_chat_case(
@@ -430,8 +428,6 @@ async def evaluate_chat_dataset(
                     embedding_provider=embedding_provider,
                 )
             )
-    finally:
-        await engine.dispose()
 
     return reports
 
@@ -712,14 +708,15 @@ async def run_chat_eval(
     output_path: str | Path | None = None,
     settings: Settings | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    dataset: ChatEvalDataset | None = None,
 ) -> ChatEvalReport:
     resolved_settings = settings or get_settings()
-    dataset = load_chat_eval_dataset(dataset_path)
+    resolved_dataset = dataset or load_chat_eval_dataset(dataset_path)
     owns_embedding_provider = embedding_provider is None
     resolved_embedding_provider = embedding_provider or OpenAIEmbeddingProvider(resolved_settings)
     try:
         case_reports = await evaluate_chat_dataset(
-            dataset.cases,
+            resolved_dataset.cases,
             settings=resolved_settings,
             embedding_provider=resolved_embedding_provider,
         )
@@ -728,7 +725,7 @@ async def run_chat_eval(
             await resolved_embedding_provider.aclose()
     report = build_report(
         dataset_path=dataset_path,
-        dataset=dataset,
+        dataset=resolved_dataset,
         case_reports=case_reports,
     )
     if output_path is not None:

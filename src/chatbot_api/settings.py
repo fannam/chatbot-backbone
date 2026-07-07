@@ -27,6 +27,7 @@ class Settings(BaseModel):
     document_chunk_overlap_chars: int = 200
     document_embedding_dimensions: int = 1536
     document_embedding_batch_size: int = 32
+    document_reindex_page_size: int = 100
     document_embedding_task_max_retries: int = 3
     document_embedding_task_retry_backoff_seconds: int = 30
     retrieval_top_k: int = 4
@@ -37,6 +38,7 @@ class Settings(BaseModel):
     tool_max_rounds: int = 4
     tool_execution_timeout_seconds: float = 15.0
     tool_search_top_k: int = 3
+    tool_search_max_top_k: int = 10
     auth_enabled: bool = False
     rate_limit_enabled: bool = False
     rate_limit_requests_per_minute: int = 60
@@ -51,7 +53,11 @@ class Settings(BaseModel):
     memory_max_summary_chars: int = 2000
     memory_max_active_items: int = 8
     memory_long_term_enabled: bool = True
+    # Despite the name, this is a full logging kill-switch, not a JSON-vs-text
+    # format toggle -- there is no alternate plain-text formatter. Setting it
+    # to False makes log_event() a no-op entirely.
     observability_json_logs: bool = True
+    observability_log_level: str = "info"
     observability_metrics_enabled: bool = True
     observability_include_request_metadata: bool = False
     langsmith_tracing_enabled: bool = False
@@ -130,6 +136,9 @@ def get_settings() -> Settings:
         document_embedding_batch_size=int(
             os.getenv("DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
         ),
+        document_reindex_page_size=int(
+            os.getenv("DOCUMENT_REINDEX_PAGE_SIZE", "100")
+        ),
         document_embedding_task_max_retries=int(
             os.getenv("DOCUMENT_EMBEDDING_TASK_MAX_RETRIES", "3")
         ),
@@ -148,6 +157,7 @@ def get_settings() -> Settings:
             os.getenv("TOOL_EXECUTION_TIMEOUT_SECONDS", "15")
         ),
         tool_search_top_k=int(os.getenv("TOOL_SEARCH_TOP_K", "3")),
+        tool_search_max_top_k=int(os.getenv("TOOL_SEARCH_MAX_TOP_K", "10")),
         auth_enabled=parse_bool_env("AUTH_ENABLED", False),
         rate_limit_enabled=parse_bool_env("RATE_LIMIT_ENABLED", False),
         rate_limit_requests_per_minute=int(
@@ -168,6 +178,7 @@ def get_settings() -> Settings:
         memory_long_term_enabled=parse_bool_env("MEMORY_LONG_TERM_ENABLED", True),
         observability_json_logs=os.getenv("OBSERVABILITY_JSON_LOGS", "true").lower()
         not in {"0", "false", "no"},
+        observability_log_level=os.getenv("OBSERVABILITY_LOG_LEVEL", "info"),
         observability_metrics_enabled=os.getenv(
             "OBSERVABILITY_METRICS_ENABLED",
             "true",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.document_tasks import CeleryDocumentTaskQueue, DocumentTaskQueue
 from chatbot_api.repositories import SqlAlchemyDocumentRepository
 from chatbot_api.settings import get_settings
@@ -12,18 +12,16 @@ async def enqueue_documents_missing_embeddings(
     task_queue: DocumentTaskQueue | None = None,
 ) -> int:
     settings = get_settings()
-    engine = create_database_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
     resolved_task_queue = task_queue or CeleryDocumentTaskQueue()
     total_enqueued = 0
     last_document_id: str | None = None
 
-    try:
+    async with session_scope(settings.database_url) as session_factory:
         while True:
             async with session_factory() as session:
                 repository = SqlAlchemyDocumentRepository(session)
                 document_ids = await repository.list_documents_missing_embeddings(
-                    limit=settings.document_embedding_batch_size,
+                    limit=settings.document_reindex_page_size,
                     after_document_id=last_document_id,
                 )
 
@@ -35,8 +33,6 @@ async def enqueue_documents_missing_embeddings(
                 total_enqueued += 1
 
             last_document_id = document_ids[-1]
-    finally:
-        await engine.dispose()
 
     return total_enqueued
 

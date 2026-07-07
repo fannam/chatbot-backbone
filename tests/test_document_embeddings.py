@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from celery.exceptions import MaxRetriesExceededError, Retry
+from sqlalchemy.exc import DBAPIError
 
 from chatbot_api.document_embeddings import DocumentEmbeddingService
 from chatbot_api.document_ingestion import DocumentChunkCreate, DocumentRecord
@@ -227,6 +228,38 @@ def test_execute_embed_document_task_retries_recoverable_errors() -> None:
     assert isinstance(captured["retry"]["exc"], EmbeddingProviderError)
     assert captured["retry"]["countdown"] == 60
     assert captured["retry"]["max_retries"] == 4
+    assert "marked_failed" not in captured
+
+
+def test_execute_embed_document_task_retries_transient_db_errors() -> None:
+    captured: dict[str, object] = {}
+
+    async def failing_job(document_id: str):
+        raise DBAPIError("connection reset", params=None, orig=Exception("reset"))
+
+    async def mark_failed(document_id: str, failure_reason: str) -> None:
+        captured["marked_failed"] = (document_id, failure_reason)
+
+    def retry(**kwargs):
+        captured["retry"] = kwargs
+        raise Retry()
+
+    settings = Settings(
+        document_embedding_task_max_retries=4,
+        document_embedding_task_retry_backoff_seconds=15,
+    )
+
+    with pytest.raises(Retry):
+        execute_embed_document_task(
+            document_id="doc-1",
+            retry_count=0,
+            retry=retry,
+            settings=settings,
+            run_job=failing_job,
+            mark_failed_job=mark_failed,
+        )
+
+    assert isinstance(captured["retry"]["exc"], DBAPIError)
     assert "marked_failed" not in captured
 
 

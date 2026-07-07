@@ -8,11 +8,13 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import chatbot_api.observability as observability_module
 from chatbot_api.main import app, get_app_observability, get_chat_service
 from chatbot_api.observability import (
     JsonLogFormatter,
     ObservabilityService,
     bind_request_context,
+    configure_json_logger,
     get_process_observability,
     reset_process_observability,
     reset_request_context,
@@ -217,6 +219,19 @@ def test_record_guardrail_check_updates_metrics_by_direction_check_outcome() -> 
         'guardrail_checks_total{direction="output",check="pii",outcome="redacted"} 2'
         in metrics_output
     )
+
+
+def test_configure_json_logger_applies_requested_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_level = observability_module._LOGGER.level
+    monkeypatch.setattr(observability_module, "_LOGGER_CONFIGURED", False)
+
+    try:
+        logger = configure_json_logger("debug")
+        assert logger.level == logging.DEBUG
+    finally:
+        observability_module._LOGGER.setLevel(original_level)
 
 
 def test_structured_logs_include_request_id() -> None:

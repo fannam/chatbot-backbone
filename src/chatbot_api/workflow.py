@@ -24,6 +24,8 @@ from chatbot_api.providers import (
     ToolResultMessage,
     ToolRun,
     UsageCost,
+    deserialize_cost,
+    deserialize_usage,
 )
 from chatbot_api.repositories import ChatRepository
 from chatbot_api.tools import ToolExecutionContext, ToolRegistry
@@ -1198,33 +1200,12 @@ def serialize_usage(usage: TokenUsage) -> ChatWorkflowUsage:
     )
 
 
-def deserialize_usage(usage: ChatWorkflowUsage | None) -> TokenUsage | None:
-    if usage is None:
-        return None
-    return TokenUsage(
-        input_tokens=usage["input_tokens"],
-        output_tokens=usage["output_tokens"],
-        total_tokens=usage["total_tokens"],
-    )
-
-
 def serialize_cost(cost: UsageCost) -> ChatWorkflowCost:
     return ChatWorkflowCost(
         input_cost_usd=cost.input_cost_usd,
         output_cost_usd=cost.output_cost_usd,
         total_cost_usd=cost.total_cost_usd,
         currency=cost.currency,
-    )
-
-
-def deserialize_cost(cost: ChatWorkflowCost | None) -> UsageCost | None:
-    if cost is None:
-        return None
-    return UsageCost(
-        input_cost_usd=cost["input_cost_usd"],
-        output_cost_usd=cost["output_cost_usd"],
-        total_cost_usd=cost["total_cost_usd"],
-        currency=cost["currency"],
     )
 
 

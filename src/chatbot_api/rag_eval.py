@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.database import session_scope
 from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.eval_common import (
     ExpectedSource,
@@ -286,31 +286,30 @@ async def run_retrieval_eval(
     output_path: str | Path | None = None,
     settings: Settings | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    dataset: RetrievalEvalDataset | None = None,
 ) -> RetrievalEvalReport:
     resolved_settings = settings or get_settings()
     retrieval_config = build_eval_config(resolved_settings)
-    dataset = load_retrieval_eval_dataset(dataset_path)
-    engine = create_database_engine(resolved_settings.database_url)
-    session_factory = create_session_factory(engine)
+    resolved_dataset = dataset or load_retrieval_eval_dataset(dataset_path)
     owns_embedding_provider = embedding_provider is None
     resolved_embedding_provider = embedding_provider or OpenAIEmbeddingProvider(resolved_settings)
 
     try:
-        async with session_factory() as session:
-            repository = SqlAlchemyDocumentRepository(session)
-            retriever = DocumentRetriever(
-                repository,
-                resolved_embedding_provider,
-                top_k=retrieval_config.top_k,
-                min_score=retrieval_config.min_score,
-                max_chunks_per_document=retrieval_config.max_chunks_per_document,
-                candidate_limit=retrieval_config.candidate_limit,
-            )
-            case_reports = await evaluate_retrieval_dataset(dataset.cases, retriever)
+        async with session_scope(resolved_settings.database_url) as session_factory:
+            async with session_factory() as session:
+                repository = SqlAlchemyDocumentRepository(session)
+                retriever = DocumentRetriever(
+                    repository,
+                    resolved_embedding_provider,
+                    top_k=retrieval_config.top_k,
+                    min_score=retrieval_config.min_score,
+                    max_chunks_per_document=retrieval_config.max_chunks_per_document,
+                    candidate_limit=retrieval_config.candidate_limit,
+                )
+                case_reports = await evaluate_retrieval_dataset(resolved_dataset.cases, retriever)
     finally:
         if owns_embedding_provider:
             await resolved_embedding_provider.aclose()
-        await engine.dispose()
 
     report = build_report(
         dataset_path=dataset_path,
