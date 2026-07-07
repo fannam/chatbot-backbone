@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from guardrails.errors import ValidationError
 
-import chatbot_api.guardrails as guardrails_module
-from chatbot_api.guardrails import (
+import chatbot_api.workflow.guardrails as guardrails_module
+from chatbot_api.workflow.guardrails import (
     JailbreakHeuristic,
     PiiDetector,
     build_input_guard,

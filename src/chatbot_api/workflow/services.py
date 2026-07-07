@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from chatbot_api.guardrails import AsyncGuard
 from chatbot_api.memory import MemoryManager
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
@@ -18,9 +17,10 @@ from chatbot_api.providers import (
     deserialize_usage,
 )
 from chatbot_api.repositories import ChatRepository
-from chatbot_api.tools import ToolRegistry
 from chatbot_api.tracing import NoopTraceSink, TraceSink
-from chatbot_api.workflow import ChatWorkflow, WorkflowStreamEvent, build_chat_workflow
+from chatbot_api.workflow.graph import ChatWorkflow, WorkflowStreamEvent, build_chat_workflow
+from chatbot_api.workflow.guardrails import AsyncGuard
+from chatbot_api.workflow.tools import ToolRegistry
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from chatbot_api.settings import Settings
-from chatbot_api.workflow import ChatWorkflow, build_chat_workflow
+from chatbot_api.workflow.graph import ChatWorkflow, build_chat_workflow
 
 
 class ChatWorkflowRuntime:

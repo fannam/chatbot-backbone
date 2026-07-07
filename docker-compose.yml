@@ -18,7 +18,7 @@ services:
       - run
       - celery
       - -A
-      - chatbot_api.celery_app:celery_app
+      - chatbot_api.tasks.celery_app:celery_app
       - worker
       - --loglevel=info
     env_file:

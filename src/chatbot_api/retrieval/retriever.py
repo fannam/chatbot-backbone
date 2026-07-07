@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from chatbot_api.embeddings import EmbeddingProvider
-from chatbot_api.memory import strip_markdown_code_fence
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
     ChatCitation,
@@ -17,8 +16,12 @@ from chatbot_api.providers import (
     ChatTurn,
     ToolCallBatch,
 )
-from chatbot_api.repositories import DocumentRepository, RetrievedDocumentChunk
+from chatbot_api.retrieval.embeddings import EmbeddingProvider
+from chatbot_api.text_utils import strip_markdown_code_fence
 from chatbot_api.tracing import NoopTraceSink, TraceSink
+
+if TYPE_CHECKING:
+    from chatbot_api.repositories import DocumentRepository, RetrievedDocumentChunk
 
 RETRIEVAL_SNIPPET_MAX_CHARS = 240
 RERANK_SYSTEM_PROMPT = (

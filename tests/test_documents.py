@@ -7,20 +7,20 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from chatbot_api.auth import AuthenticatedUser
-from chatbot_api.document_ingestion import (
-    DefaultDocumentTextExtractor,
-    DocumentChunkCreate,
-    DocumentContentError,
-    DocumentIngestionService,
-    DocumentRecord,
-    TextChunker,
-)
 from chatbot_api.main import (
     app,
     get_authenticated_user,
     get_document_repository,
     get_document_service,
     get_document_task_queue,
+)
+from chatbot_api.retrieval import (
+    DefaultDocumentTextExtractor,
+    DocumentChunkCreate,
+    DocumentContentError,
+    DocumentIngestionService,
+    DocumentRecord,
+    TextChunker,
 )
 
 

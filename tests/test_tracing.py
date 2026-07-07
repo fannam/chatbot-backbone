@@ -20,16 +20,21 @@ from chatbot_api.providers import (
 )
 from chatbot_api.repositories import MessageRecord, PersistedExchange, RetrievedDocumentChunk
 from chatbot_api.retrieval import DocumentRetriever
-from chatbot_api.services import ChatService, ChatStreamComplete, ChatStreamStart
 from chatbot_api.settings import Settings
-from chatbot_api.tools import build_tool_registry
 from chatbot_api.tracing import (
     LangSmithTraceSink,
     NoopTraceSink,
     build_trace_sink,
     sanitize_trace_value,
 )
-from chatbot_api.workflow import ChatWorkflow, build_chat_workflow
+from chatbot_api.workflow import (
+    ChatService,
+    ChatStreamComplete,
+    ChatStreamStart,
+    ChatWorkflow,
+    build_chat_workflow,
+    build_tool_registry,
+)
 
 _CURRENT_SPAN: ContextVar["RecordedTraceSpan | None"] = ContextVar(
     "recorded_trace_span",

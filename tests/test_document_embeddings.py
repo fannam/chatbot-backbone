@@ -7,12 +7,15 @@ import pytest
 from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy.exc import DBAPIError
 
-from chatbot_api.document_embeddings import DocumentEmbeddingService
-from chatbot_api.document_ingestion import DocumentChunkCreate, DocumentRecord
-from chatbot_api.embeddings import EmbeddingProviderError
 from chatbot_api.repositories import ChunkEmbeddingUpdate, ChunkWithoutEmbedding
+from chatbot_api.retrieval import (
+    DocumentChunkCreate,
+    DocumentEmbeddingService,
+    DocumentRecord,
+    EmbeddingProviderError,
+)
 from chatbot_api.settings import Settings
-from chatbot_api.tasks import calculate_retry_countdown, execute_embed_document_task
+from chatbot_api.tasks.embedding_jobs import calculate_retry_countdown, execute_embed_document_task
 
 
 @dataclass

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from chatbot_api.providers import ToolCallRequest
 from chatbot_api.repositories import RetrievedDocumentChunk
-from chatbot_api.tools import (
+from chatbot_api.workflow.tools import (
     RegisteredTool,
     ToolExecutionContext,
     ToolRegistry,

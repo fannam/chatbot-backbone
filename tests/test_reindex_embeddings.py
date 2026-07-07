@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 
 from chatbot_api.database import create_database_engine, create_session_factory
-from chatbot_api.document_ingestion import DocumentChunkCreate
 from chatbot_api.models import Base
-from chatbot_api.reindex_embeddings import enqueue_documents_missing_embeddings
 from chatbot_api.repositories import SqlAlchemyDocumentRepository
+from chatbot_api.retrieval import DocumentChunkCreate
 from chatbot_api.settings import get_settings
+from chatbot_api.tasks.reindex_embeddings import enqueue_documents_missing_embeddings
 
 
 class StubDocumentTaskQueue:

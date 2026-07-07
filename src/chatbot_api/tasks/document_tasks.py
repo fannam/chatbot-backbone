@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from chatbot_api.tasks import embed_document_task
+from chatbot_api.tasks.embedding_jobs import embed_document_task
 
 
 class DocumentTaskQueue(Protocol):

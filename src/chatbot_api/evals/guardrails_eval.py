@@ -10,8 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from chatbot_api.eval_common import safe_ratio, write_report
-from chatbot_api.guardrails import GuardrailsValidationError, build_input_guard
+from chatbot_api.evals.eval_common import safe_ratio, write_report
+from chatbot_api.workflow import GuardrailsValidationError, build_input_guard
 
 DEFAULT_DATASET_PATH = Path("evals/guardrails_jailbreak.json")
 

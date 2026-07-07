@@ -10,7 +10,7 @@ def create_celery_app(settings: Settings | None = None) -> Celery:
     app = Celery(
         "chatbot_api",
         broker=resolved_settings.celery_broker_url,
-        include=["chatbot_api.tasks"],
+        include=["chatbot_api.tasks.embedding_jobs"],
     )
     app.conf.task_ignore_result = True
     return app

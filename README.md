@@ -52,7 +52,7 @@ uv run uvicorn chatbot_api.main:app --reload --app-dir src
 Run the background worker in a second terminal:
 
 ```bash
-uv run celery -A chatbot_api.celery_app:celery_app worker --loglevel=info
+uv run celery -A chatbot_api.tasks.celery_app:celery_app worker --loglevel=info
 ```
 
 Example chat request:
@@ -157,7 +157,7 @@ require `X-API-Key`.
 Provision a user plus one API key:
 
 ```bash
-uv run python -m chatbot_api.create_api_key \
+uv run python -m chatbot_api.tasks.create_api_key \
   --user-id user-123 \
   --name dev \
   --display-name "Alice" \
@@ -421,7 +421,7 @@ chat request, including extra model rounds triggered by tool calling.
 
 Guardrails are built on [Guardrails AI](https://github.com/guardrails-ai/guardrails)
 (`AsyncGuard`), using only locally-defined custom validators
-(`src/chatbot_api/guardrails.py`) — no Guardrails Hub account or API key is
+(`src/chatbot_api/workflow/guardrails.py`) — no Guardrails Hub account or API key is
 required, and no validator ever calls out to a third party (the Hub's usage
 telemetry is explicitly disabled at import time; see the module docstring for
 details). Four independent, opt-in checks are layered on `POST /chat`:
@@ -452,7 +452,7 @@ Run the jailbreak/PII regression eval to sanity-check the heuristics against a
 curated set of true positives, deliberate false-positive traps, and PII cases:
 
 ```bash
-uv run python -m chatbot_api.guardrails_eval --dataset evals/guardrails_jailbreak.json
+uv run python -m chatbot_api.evals.guardrails_eval --dataset evals/guardrails_jailbreak.json
 ```
 
 **What this does NOT cover:**
@@ -518,7 +518,7 @@ Enqueue embedding jobs for existing documents that still have missing chunk
 embeddings:
 
 ```bash
-uv run python -m chatbot_api.reindex_embeddings
+uv run python -m chatbot_api.tasks.reindex_embeddings
 ```
 
 ## Retrieval eval baseline
@@ -527,7 +527,7 @@ The repo includes an offline retrieval baseline to measure document selection
 quality before changing retrieval thresholds, ANN indexes, or reranking:
 
 ```bash
-uv run python -m chatbot_api.rag_eval \
+uv run python -m chatbot_api.evals.rag_eval \
   --dataset evals/rag_retrieval_baseline.json \
   --output .artifacts/rag-eval-report.json
 ```
@@ -549,7 +549,7 @@ The repo also includes a deterministic service-level regression eval for the
 `ChatService` + LangGraph + tool-calling path:
 
 ```bash
-uv run python -m chatbot_api.chat_eval \
+uv run python -m chatbot_api.evals.chat_eval \
   --dataset evals/chat_tool_regression.json \
   --output .artifacts/chat-eval-report.json
 ```
@@ -580,7 +580,7 @@ The repo also includes a deterministic memory-focused regression eval for the
 real `ChatService` + `MemoryManager` path:
 
 ```bash
-uv run python -m chatbot_api.memory_eval \
+uv run python -m chatbot_api.evals.memory_eval \
   --dataset evals/memory_regression.json \
   --output .artifacts/memory-eval-report.json
 ```
@@ -614,7 +614,7 @@ For a single local/dev quality gate that checks corpus readiness and runs the
 retrieval, chat/tool, and memory evals together:
 
 ```bash
-uv run python -m chatbot_api.eval_suite \
+uv run python -m chatbot_api.evals.eval_suite \
   --rag-dataset evals/rag_retrieval_baseline.json \
   --chat-dataset evals/chat_tool_regression.json \
   --memory-dataset evals/memory_regression.json \

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from chatbot_api.embeddings import EmbeddingProvider
-from chatbot_api.repositories import (
-    ChunkEmbeddingUpdate,
-    ChunkWithoutEmbedding,
-    DocumentRepository,
-)
+from chatbot_api.retrieval.embeddings import EmbeddingProvider
+
+if TYPE_CHECKING:
+    from chatbot_api.repositories import ChunkWithoutEmbedding, DocumentRepository
 
 
 @dataclass(frozen=True)
@@ -76,6 +75,8 @@ class DocumentEmbeddingService:
         )
 
     async def _embed_chunk_batch(self, chunks: list[ChunkWithoutEmbedding]) -> int:
+        from chatbot_api.repositories import ChunkEmbeddingUpdate
+
         embeddings = await self._embedding_provider.embed_texts([chunk.content for chunk in chunks])
         if len(embeddings) != len(chunks):
             raise ValueError("embedding provider returned invalid chunk embeddings")

@@ -9,7 +9,6 @@ from sqlalchemy import Select, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from chatbot_api.auth import AuthenticatedUser, build_api_key_prefix, generate_api_key, hash_api_key
-from chatbot_api.document_ingestion import DocumentChunkCreate, DocumentRecord
 from chatbot_api.models import (
     ApiKey,
     Conversation,
@@ -23,6 +22,7 @@ from chatbot_api.models import (
     utcnow,
 )
 from chatbot_api.providers import ChatTurn
+from chatbot_api.retrieval.document_ingestion import DocumentChunkCreate, DocumentRecord
 
 
 class OwnershipError(Exception):

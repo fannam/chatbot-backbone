@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chatbot_api.document_ingestion import TextChunker
+from chatbot_api.retrieval import TextChunker
 
 
 def test_chunker_uses_fixed_overlap_when_hard_splitting() -> None:

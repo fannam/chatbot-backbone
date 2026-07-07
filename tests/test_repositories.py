@@ -8,7 +8,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from chatbot_api.database import Base
-from chatbot_api.document_ingestion import DocumentChunkCreate
 from chatbot_api.models import (
     ApiKey,
     Conversation,
@@ -30,6 +29,7 @@ from chatbot_api.repositories import (
     SqlAlchemyDocumentRepository,
     SqlAlchemyMemoryRepository,
 )
+from chatbot_api.retrieval import DocumentChunkCreate
 
 
 class SyncAsyncSessionAdapter:

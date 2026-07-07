@@ -7,8 +7,6 @@ from typing import Any
 import pytest
 from langgraph.runtime import Runtime
 
-from chatbot_api import workflow as workflow_module
-from chatbot_api.guardrails import AsyncGuard, build_output_guard
 from chatbot_api.memory import MemoryManager, extract_rule_based_memories
 from chatbot_api.models import utcnow
 from chatbot_api.observability import ObservabilityService
@@ -33,9 +31,10 @@ from chatbot_api.repositories import (
     RetrievedDocumentChunk,
 )
 from chatbot_api.settings import Settings
-from chatbot_api.tools import ToolRegistry, build_tool_registry
 from chatbot_api.tracing import NoopTraceSink
-from chatbot_api.workflow import (
+from chatbot_api.workflow import AsyncGuard, ToolRegistry, build_output_guard, build_tool_registry
+from chatbot_api.workflow import graph as workflow_module
+from chatbot_api.workflow.graph import (
     MAX_METADATA_CITATIONS,
     WorkflowMessageComplete,
     WorkflowMessageDelta,
@@ -683,7 +682,7 @@ async def test_output_guardrail_node_redacts_pii_in_assistant_message() -> None:
 async def test_output_guardrail_node_substitutes_refusal_message_on_hard_block() -> None:
     class AlwaysBlockGuard:
         async def validate(self, value: str):
-            from chatbot_api.guardrails import GuardrailsValidationError
+            from chatbot_api.workflow import GuardrailsValidationError
 
             raise GuardrailsValidationError("blocked for test")
 

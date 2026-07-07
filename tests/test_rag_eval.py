@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 
 from chatbot_api.database import create_database_engine, create_session_factory
-from chatbot_api.document_ingestion import DocumentChunkCreate
-from chatbot_api.models import Base
-from chatbot_api.rag_eval import (
+from chatbot_api.evals.rag_eval import (
     RetrievalEvalCase,
     build_case_report,
     load_retrieval_eval_dataset,
     run_retrieval_eval,
 )
+from chatbot_api.models import Base
 from chatbot_api.repositories import RetrievedDocumentChunk, SqlAlchemyDocumentRepository
+from chatbot_api.retrieval import DocumentChunkCreate
 from chatbot_api.settings import Settings
 
 

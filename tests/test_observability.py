@@ -28,10 +28,9 @@ from chatbot_api.providers import (
 )
 from chatbot_api.repositories import RetrievedDocumentChunk
 from chatbot_api.retrieval import DocumentRetriever
-from chatbot_api.services import ChatService
 from chatbot_api.settings import Settings, get_settings
-from chatbot_api.tasks import execute_embed_document_task
-from chatbot_api.tools import ToolExecutionContext, build_tool_registry
+from chatbot_api.tasks.embedding_jobs import execute_embed_document_task
+from chatbot_api.workflow import ChatService, ToolExecutionContext, build_tool_registry
 
 
 class StubRetrieverRepository:

@@ -10,37 +10,37 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from chatbot_api.chat_eval import (
+from chatbot_api.database import session_scope
+from chatbot_api.evals.chat_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_CHAT_DATASET_PATH,
 )
-from chatbot_api.chat_eval import (
+from chatbot_api.evals.chat_eval import (
     ChatEvalDataset,
     ChatEvalSummary,
     load_chat_eval_dataset,
     run_chat_eval,
 )
-from chatbot_api.database import session_scope
-from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
-from chatbot_api.eval_common import unique_preserving_order, write_report
-from chatbot_api.memory_eval import (
+from chatbot_api.evals.eval_common import unique_preserving_order, write_report
+from chatbot_api.evals.memory_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_MEMORY_DATASET_PATH,
 )
-from chatbot_api.memory_eval import (
+from chatbot_api.evals.memory_eval import (
     MemoryEvalSummary,
     load_memory_eval_dataset,
     run_memory_eval,
 )
-from chatbot_api.models import Document
-from chatbot_api.rag_eval import (
+from chatbot_api.evals.rag_eval import (
     DEFAULT_DATASET_PATH as DEFAULT_RAG_DATASET_PATH,
 )
-from chatbot_api.rag_eval import (
+from chatbot_api.evals.rag_eval import (
     RetrievalEvalConfig,
     RetrievalEvalSummary,
     build_eval_config,
     load_retrieval_eval_dataset,
     run_retrieval_eval,
 )
+from chatbot_api.models import Document
+from chatbot_api.retrieval import EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.settings import Settings, get_settings
 
 DEFAULT_OUTPUT_DIR = Path(".artifacts")

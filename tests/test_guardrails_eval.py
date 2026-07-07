@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from chatbot_api.guardrails_eval import (
+from chatbot_api.evals.guardrails_eval import (
     build_report,
     evaluate_guardrails_dataset,
     load_guardrails_eval_dataset,
@@ -88,7 +88,7 @@ async def test_run_guardrails_eval_reports_zero_false_positive_and_negative_rate
 
 
 def test_build_report_computes_false_positive_and_negative_rates() -> None:
-    from chatbot_api.guardrails_eval import GuardrailsEvalCaseReport
+    from chatbot_api.evals.guardrails_eval import GuardrailsEvalCaseReport
 
     case_reports = [
         GuardrailsEvalCaseReport(

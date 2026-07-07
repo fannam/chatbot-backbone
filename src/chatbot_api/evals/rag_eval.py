@@ -10,8 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chatbot_api.database import session_scope
-from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
-from chatbot_api.eval_common import (
+from chatbot_api.evals.eval_common import (
     ExpectedSource,
     safe_ratio,
     source_matches_reference,
@@ -19,7 +18,7 @@ from chatbot_api.eval_common import (
     write_report,
 )
 from chatbot_api.repositories import RetrievedDocumentChunk, SqlAlchemyDocumentRepository
-from chatbot_api.retrieval import DocumentRetriever
+from chatbot_api.retrieval import DocumentRetriever, EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.settings import Settings, get_settings
 
 DEFAULT_DATASET_PATH = Path("evals/rag_retrieval_baseline.json")

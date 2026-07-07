@@ -8,17 +8,17 @@ from celery import Task
 from celery.exceptions import MaxRetriesExceededError, Retry
 from sqlalchemy.exc import DBAPIError
 
-from chatbot_api.celery_app import celery_app
 from chatbot_api.database import session_scope
-from chatbot_api.document_embeddings import DocumentEmbeddingService
-from chatbot_api.embeddings import (
+from chatbot_api.observability import get_process_observability
+from chatbot_api.repositories import SqlAlchemyDocumentRepository
+from chatbot_api.retrieval import (
+    DocumentEmbeddingService,
     EmbeddingProviderError,
     EmbeddingProviderTimeoutError,
     OpenAIEmbeddingProvider,
 )
-from chatbot_api.observability import get_process_observability
-from chatbot_api.repositories import SqlAlchemyDocumentRepository
 from chatbot_api.settings import get_settings
+from chatbot_api.tasks.celery_app import celery_app
 
 
 async def run_embed_document(document_id: str) -> dict[str, str | int] | None:

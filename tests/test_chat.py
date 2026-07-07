@@ -31,7 +31,9 @@ from chatbot_api.providers import (
     ToolRun,
     UsageCost,
 )
-from chatbot_api.services import (
+from chatbot_api.settings import Settings, get_settings
+from chatbot_api.tracing import NoopTraceSink
+from chatbot_api.workflow import (
     ChatService,
     ChatStreamChunk,
     ChatStreamComplete,
@@ -39,8 +41,6 @@ from chatbot_api.services import (
     ChatStreamToolComplete,
     ChatStreamToolStart,
 )
-from chatbot_api.settings import Settings, get_settings
-from chatbot_api.tracing import NoopTraceSink
 
 
 @dataclass(frozen=True)

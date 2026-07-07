@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from chatbot_api.settings import Settings
-from chatbot_api.workflow_runtime import ChatWorkflowRuntime
+from chatbot_api.workflow import ChatWorkflowRuntime
 
 
 @pytest.mark.anyio

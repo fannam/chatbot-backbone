@@ -11,8 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chatbot_api.database import session_scope
-from chatbot_api.embeddings import EmbeddingProvider, OpenAIEmbeddingProvider
-from chatbot_api.eval_common import (
+from chatbot_api.evals.eval_common import (
     ExpectedSource,
     is_deep_subset,
     safe_ratio,
@@ -34,10 +33,9 @@ from chatbot_api.providers import (
     UsageCost,
 )
 from chatbot_api.repositories import SqlAlchemyChatRepository, SqlAlchemyDocumentRepository
-from chatbot_api.retrieval import DocumentRetriever
-from chatbot_api.services import ChatService
+from chatbot_api.retrieval import DocumentRetriever, EmbeddingProvider, OpenAIEmbeddingProvider
 from chatbot_api.settings import Settings, get_settings
-from chatbot_api.tools import build_tool_registry
+from chatbot_api.workflow import ChatService, build_tool_registry
 
 DEFAULT_DATASET_PATH = Path("evals/chat_tool_regression.json")
 

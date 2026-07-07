@@ -23,6 +23,7 @@ from chatbot_api.repositories import (
     MessageRecord,
 )
 from chatbot_api.settings import Settings
+from chatbot_api.text_utils import strip_markdown_code_fence
 from chatbot_api.tracing import NoopTraceSink, TraceSink
 
 RULE_LANGUAGE_PATTERN = re.compile(
@@ -561,12 +562,3 @@ def parse_llm_memory_response(result: ChatCompletion) -> list[MemoryCandidate]:
             )
         )
     return candidates
-
-
-def strip_markdown_code_fence(value: str) -> str:
-    if not value.startswith("```"):
-        return value
-    lines = value.splitlines()
-    if len(lines) >= 2 and lines[-1].strip() == "```":
-        return "\n".join(lines[1:-1]).strip()
-    return value

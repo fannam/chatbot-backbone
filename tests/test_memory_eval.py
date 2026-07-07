@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from chatbot_api.database import create_database_engine
-from chatbot_api.memory_eval import load_memory_eval_dataset, run_memory_eval
+from chatbot_api.evals.memory_eval import load_memory_eval_dataset, run_memory_eval
 from chatbot_api.models import Base
 from chatbot_api.settings import Settings
 

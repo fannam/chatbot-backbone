@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-import chatbot_api.eval_suite as eval_suite_module
+import chatbot_api.evals.eval_suite as eval_suite_module
 from chatbot_api.database import create_database_engine, create_session_factory
-from chatbot_api.document_ingestion import DocumentChunkCreate
-from chatbot_api.eval_suite import exit_code_for_report, run_eval_suite
+from chatbot_api.evals.eval_suite import exit_code_for_report, run_eval_suite
 from chatbot_api.models import Base
 from chatbot_api.repositories import SqlAlchemyDocumentRepository
+from chatbot_api.retrieval import DocumentChunkCreate
 from chatbot_api.settings import Settings
 
 

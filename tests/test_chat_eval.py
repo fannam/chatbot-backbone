@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from chatbot_api.chat_eval import (
+from chatbot_api.database import create_database_engine, create_session_factory
+from chatbot_api.evals.chat_eval import (
     ChatEvalCase,
     ChatEvalHistoryTurn,
     ScriptedEvalProvider,
@@ -15,11 +16,10 @@ from chatbot_api.chat_eval import (
     run_chat_eval,
     seed_history,
 )
-from chatbot_api.database import create_database_engine, create_session_factory
-from chatbot_api.document_ingestion import DocumentChunkCreate
 from chatbot_api.models import Base
 from chatbot_api.providers import ChatTurn, ToolCallBatch, ToolResultMessage
 from chatbot_api.repositories import SqlAlchemyChatRepository, SqlAlchemyDocumentRepository
+from chatbot_api.retrieval import DocumentChunkCreate
 from chatbot_api.settings import Settings
 
 

@@ -11,7 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chatbot_api.database import session_scope
-from chatbot_api.eval_common import is_deep_subset, safe_ratio, seed_history, write_report
+from chatbot_api.evals.eval_common import is_deep_subset, safe_ratio, seed_history, write_report
 from chatbot_api.memory import MemoryManager, extract_user_id
 from chatbot_api.providers import ChatCompletion, ChatProvider, ChatTurn, ToolCallBatch
 from chatbot_api.repositories import (
@@ -20,9 +20,9 @@ from chatbot_api.repositories import (
     SqlAlchemyChatRepository,
     SqlAlchemyMemoryRepository,
 )
-from chatbot_api.services import ChatService
 from chatbot_api.settings import Settings, get_settings
 from chatbot_api.tracing import NoopTraceSink
+from chatbot_api.workflow import ChatService
 
 DEFAULT_DATASET_PATH = Path("evals/memory_regression.json")
 

@@ -9,7 +9,6 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
-from chatbot_api.guardrails import AsyncGuard, GuardrailsValidationError
 from chatbot_api.memory import MemoryManager, build_base_system_message
 from chatbot_api.observability import ObservabilityService
 from chatbot_api.providers import (
@@ -28,8 +27,9 @@ from chatbot_api.providers import (
     deserialize_usage,
 )
 from chatbot_api.repositories import ChatRepository
-from chatbot_api.tools import ToolExecutionContext, ToolRegistry
 from chatbot_api.tracing import NoopTraceSink, TraceSink
+from chatbot_api.workflow.guardrails import AsyncGuard, GuardrailsValidationError
+from chatbot_api.workflow.tools import ToolExecutionContext, ToolRegistry
 
 MAX_METADATA_CITATIONS = 4
 TOOL_ROUND_LIMIT_MESSAGE = (
